@@ -105,6 +105,35 @@ export default class UwuCryptPlugin extends Plugin {
         );
 
         this.registerEvent(
+            this.app.vault.on('rename', async (file, oldPath) => {
+                if (file instanceof TFile && this.vaultManager.unlocked()) {
+                    const shouldEncrypt = this.fileProcessor.shouldEncryptPath(file.path);
+                    const buffer = await this.originalAdapterReadBinary.call(this.app.vault.adapter, file.path);
+                    const isEncrypted = this.isEncrypted(buffer);
+
+                    if (shouldEncrypt && !isEncrypted) {
+                        await this.fileProcessor.processFile(file, true);
+                        new Notice(`UWU Crypt: Protected moved file ${file.name}`);
+                    }
+                }
+            })
+        );
+
+        this.registerEvent(
+            this.app.vault.on('create', async (file) => {
+                if (file instanceof TFile && this.vaultManager.unlocked()) {
+                    const shouldEncrypt = this.fileProcessor.shouldEncryptPath(file.path);
+                    if (shouldEncrypt) {
+                        const buffer = await this.originalAdapterReadBinary.call(this.app.vault.adapter, file.path);
+                        if (!this.isEncrypted(buffer)) {
+                            await this.fileProcessor.processFile(file, true);
+                        }
+                    }
+                }
+            })
+        );
+
+        this.registerEvent(
             this.app.workspace.on('file-menu', (menu: Menu, file: TAbstractFile) => {
                 if (file instanceof TFile) {
                     menu.addItem((item) => {
