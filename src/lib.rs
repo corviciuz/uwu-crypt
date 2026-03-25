@@ -104,7 +104,7 @@ impl UwuCore {
         signature.copy_from_slice(&sig_hash.as_bytes()[..16]);
 
         let auth_hash_full = blake3::keyed_hash(&raw_master_key, b"UWU_AUTH_CHECK");
-        let mut auth_hash = *blake3::keyed_hash(&raw_master_key, b"UWU_AUTH_CHECK").as_bytes();
+        let mut auth_hash = [0u8; 32];
         auth_hash.copy_from_slice(auth_hash_full.as_bytes());
 
         raw_master_key.zeroize();
