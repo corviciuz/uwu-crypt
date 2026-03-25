@@ -109,6 +109,21 @@ export class UwuView extends FileView {
         if (this.lockedEl) this.lockedEl.style.display = 'none';
         if (this.errorEl) this.errorEl.style.display = 'none';
 
+        const ext = this.file?.extension.toLowerCase() || "";
+        const textExtensions = ["md", "txt", "task", "canvas"];
+        const isText = textExtensions.includes(ext);
+
+        if (!isText) {
+             // If decrypted and binary, just tell Obsidian to switch to the native viewer
+             const viewType = (this.app as any).viewRegistry?.getTypeByExtension(ext) || "markdown";
+             this.leaf.setViewState({
+                 type: viewType,
+                 state: this.getState(),
+                 popstate: true
+             } as any);
+             return;
+        }
+
         try {
             const encryptedData = await this.app.vault.readBinary(this.file!);
             const sig = this.vaultManager.signature;

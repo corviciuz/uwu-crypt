@@ -182,9 +182,10 @@ export default class UwuCryptPlugin extends Plugin {
             this.app.workspace.iterateAllLeaves((leaf) => {
                 if (leaf.view.getViewType() === UWU_VIEW_TYPE) {
                     const file = (leaf.view as any).file;
-                    if (file) {
+                    if (file instanceof TFile) {
+                        const viewType = (this.app as any).viewRegistry?.getTypeByExtension(file.extension) || 'markdown';
                         leaf.setViewState({
-                            type: 'markdown',
+                            type: viewType,
                             state: leaf.view.getState(),
                             popstate: true
                         } as any);
@@ -194,28 +195,25 @@ export default class UwuCryptPlugin extends Plugin {
             new Notice('(*￣︶￣)/ Vault Unlocked');
         }));
 
-        this.registerEvent(this.app.workspace.on('uwu-crypt:lock' as any, async () => {
+        this.registerEvent(this.app.workspace.on('uwu-crypt:lock' as any, () => {
             // 1. Physically zeroize decrypted buffers before clearing
             const entries = Array.from(this.decryptionCache.values());
             for (const promise of entries) {
                 try {
-                    const { data, mask } = await promise;
-                    data.fill(0);
-                    mask.fill(0);
+                    promise.then(({ data, mask }) => {
+                        data.fill(0);
+                        mask.fill(0);
+                    });
                 } catch {}
             }
             this.decryptionCache.clear();
 
-            // 2. Refresh views (Switch back to UwuView/Locked state)
+            // 2. Refresh views (Switch ALL relevant leaves to UwuView/Locked state)
             this.app.workspace.iterateAllLeaves((leaf) => {
-                if (leaf.view.getViewType() === 'markdown') {
-                    const file = (leaf.view as any).file;
-                    if (file instanceof TFile) {
-                        this.originalAdapterReadBinary.call(this.app.vault.adapter, file.path).then((buffer: ArrayBuffer) => {
-                            if (this.isEncrypted(buffer)) {
-                                this.activateUwuView(file);
-                            }
-                        });
+                const file = (leaf.view as any).file;
+                if (file instanceof TFile && leaf.view.getViewType() !== UWU_VIEW_TYPE) {
+                    if (this.fileProcessor.shouldEncryptPath(file.path)) {
+                        this.activateUwuView(file);
                     }
                 }
             });
@@ -226,7 +224,7 @@ export default class UwuCryptPlugin extends Plugin {
 
         // Initial Setup Modal Check (only if no vault exists)
         this.app.workspace.onLayoutReady(async () => {
-            const hasConfig = this.app.vault.getAbstractFileByPath('.uwu/config.json') || this.settings.manifestBackup;
+            const hasConfig = this.app.vault.getAbstractFileByPath('.uwu/vault.uwu') || this.settings.manifestBackup;
             if (!hasConfig) {
                 this.vaultManager.requestUnlock(true);
             }

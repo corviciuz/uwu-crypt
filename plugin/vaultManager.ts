@@ -76,9 +76,9 @@ export class VaultManager {
         });
     }
 
-    async createVault(pass1: string, pass2: string): Promise<Uint8Array> {
+    async createVault(pass1: string, pass2: string, m: number, t: number): Promise<Uint8Array> {
         await this.readyPromise;
-        const { manifest } = await this.sendMessage('CREATE', { pass1, pass2 });
+        const { manifest } = await this.sendMessage('CREATE', { pass1, pass2, m, t });
         await this.saveManifest(manifest);
         this.isLocked = false;
         this.plugin.app.workspace.trigger('uwu-crypt:unlock');
@@ -137,6 +137,12 @@ export class VaultManager {
         }
     }
 
+    async testPerformance(m: number, t: number): Promise<number> {
+        const start = performance.now();
+        await this.sendMessage('TEST_PERF', { m, t });
+        return performance.now() - start;
+    }
+
     async encrypt(data: Uint8Array, zstdLevel: number): Promise<Uint8Array> {
         const { data: ciphertext } = await this.sendMessage('ENCRYPT', { data, zstdLevel });
         return ciphertext;
@@ -148,43 +154,51 @@ export class VaultManager {
     }
 
     private async saveManifest(manifest: Uint8Array) {
-        // Redundancy: .uwu/config.json and plugin data.json
-        const hex = Array.from(manifest).map(b => b.toString(16).padStart(2, '0')).join('');
+        // Redundancy: .uwu/vault.uwu and plugin data.json
+        const base64 = btoa(String.fromCharCode(...manifest));
         
-        // Save to .uwu/config.json
+        // Save to .uwu/vault.uwu
         const folder = this.plugin.app.vault.getAbstractFileByPath('.uwu');
         if (!folder) {
             await this.plugin.app.vault.createFolder('.uwu');
         }
-        const configFile = '.uwu/config.json';
-        const content = JSON.stringify({ manifest: hex });
-        const existing = this.plugin.app.vault.getAbstractFileByPath(configFile);
+        const vaultFile = '.uwu/vault.uwu';
+        const existing = this.plugin.app.vault.getAbstractFileByPath(vaultFile);
         if (existing instanceof TFile) {
-            await this.plugin.app.vault.modify(existing, content);
+            await this.plugin.app.vault.modify(existing, base64);
         } else {
-            await this.plugin.app.vault.create(configFile, content);
+            await this.plugin.app.vault.create(vaultFile, base64);
         }
 
         // Save to data.json
-        (this.plugin as any).settings.manifestBackup = hex;
+        (this.plugin as any).settings.manifestBackup = base64;
         await (this.plugin as any).saveSettings();
     }
 
     private async getManifest(): Promise<Uint8Array | null> {
-        const configFile = '.uwu/config.json';
-        const file = this.plugin.app.vault.getAbstractFileByPath(configFile);
-        let hex: string | null = null;
+        const vaultFile = '.uwu/vault.uwu';
+        const file = this.plugin.app.vault.getAbstractFileByPath(vaultFile);
+        let base64: string | null = null;
 
         if (file instanceof TFile) {
-            const content = JSON.parse(await this.plugin.app.vault.read(file));
-            hex = content.manifest;
+            base64 = (await this.plugin.app.vault.read(file)).trim();
         } else {
             // Restore from backup
-            hex = (this.plugin as any).settings.manifestBackup;
+            base64 = (this.plugin as any).settings.manifestBackup;
         }
 
-        if (!hex) return null;
-        return new Uint8Array(hex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+        if (!base64) return null;
+        try {
+            const binaryString = atob(base64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes;
+        } catch (e) {
+            console.error("Failed to decode base64 manifest", e);
+            return null;
+        }
     }
 
     private startSessionTimer() {

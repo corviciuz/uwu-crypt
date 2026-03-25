@@ -10,7 +10,7 @@ self.onmessage = async (e) => {
     const { type, payload, id } = e.data;
 
     try {
-        if (!core && type !== 'INIT' && type !== 'UNLOCK' && type !== 'CREATE') {
+        if (!core && type !== 'INIT' && type !== 'UNLOCK' && type !== 'CREATE' && type !== 'TEST_PERF') {
             throw new Error('Vault not unlocked');
         }
 
@@ -22,20 +22,25 @@ self.onmessage = async (e) => {
                 break;
 
             case 'CREATE':
-                const [newSession, manifest] = await UwuCore.create_vault(payload.pass1, payload.pass2);
+                const [newSession, manifest] = await (UwuCore as any).create_vault(payload.pass1, payload.pass2, payload.m, payload.t);
                 core = newSession;
                 // Zeroize passwords in worker memory
-                delete payload.pass1;
-                delete payload.pass2;
+                payload.pass1 = "";
+                payload.pass2 = "";
                 self.postMessage({ id, type: 'CREATED', payload: { manifest } });
                 break;
 
             case 'UNLOCK':
-                core = await UwuCore.unlock_vault(payload.pass1, payload.pass2, payload.payload);
+                core = await (UwuCore as any).unlock_vault(payload.pass1, payload.pass2, payload.payload);
                 // Zeroize passwords in worker memory
-                delete payload.pass1;
-                delete payload.pass2;
+                payload.pass1 = "";
+                payload.pass2 = "";
                 self.postMessage({ id, type: 'UNLOCKED' });
+                break;
+
+            case 'TEST_PERF':
+                (UwuCore as any).test_performance(payload.m, payload.t); // Performance measured by the caller in JS
+                self.postMessage({ id, type: 'TEST_DONE' });
                 break;
 
             case 'ENCRYPT':

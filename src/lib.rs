@@ -11,8 +11,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use zstd::stream::{decode_all, encode_all};
 
 const STEALTH_SIG_KEY: &[u8] = b"UWU_V1";
-const ARGON_M: u32 = 524288;
-const ARGON_T: u32 = 4;
 const ARGON_P: u32 = 1;
 const ARGON_OUT_LEN: usize = 32;
 
@@ -26,6 +24,8 @@ pub struct VaultManifest {
     salt_mix: Vec<u8>,
     #[serde(with = "serde_bytes")]
     salt_argon: Vec<u8>,
+    pub argon_m: u32,
+    pub argon_t: u32,
 }
 
 #[wasm_bindgen]
@@ -45,9 +45,9 @@ struct FilePackage {
     ciphertext: Vec<u8>,
 }
 
-fn derive_argon2id(password: &[u8], salt: &[u8]) -> Result<[u8; 32], String> {
+fn derive_argon2id(password: &[u8], salt: &[u8], m: u32, t: u32) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
-    let params = ArgonParams::new(ARGON_M, ARGON_T, ARGON_P, Some(ARGON_OUT_LEN))
+    let params = ArgonParams::new(m, t, ARGON_P, Some(ARGON_OUT_LEN))
         .map_err(|e| format!("Argon2 params error: {:?}", e))?;
 
     let argon2 = Argon2::new(ArgonAlgorithm::Argon2id, ArgonVersion::V0x13, params);
@@ -59,13 +59,20 @@ fn derive_argon2id(password: &[u8], salt: &[u8]) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-fn derive_master_key(p1: &str, p2: &str, s_mix: &[u8], s_argon: &[u8]) -> Result<[u8; 32], String> {
+fn derive_master_key(
+    p1: &str,
+    p2: &str,
+    s_mix: &[u8],
+    s_argon: &[u8],
+    m: u32,
+    t: u32,
+) -> Result<[u8; 32], String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(p1.as_bytes());
     hasher.update(p2.as_bytes());
     hasher.update(s_mix);
     let mut mixed_seed = *hasher.finalize().as_bytes();
-    let key = derive_argon2id(&mixed_seed, s_argon)?;
+    let key = derive_argon2id(&mixed_seed, s_argon, m, t)?;
     mixed_seed.zeroize();
     Ok(key)
 }
@@ -73,13 +80,18 @@ fn derive_master_key(p1: &str, p2: &str, s_mix: &[u8], s_argon: &[u8]) -> Result
 #[wasm_bindgen]
 impl UwuCore {
     #[wasm_bindgen]
-    pub async fn create_vault(pass1: &str, pass2: &str) -> Result<JsValue, String> {
+    pub async fn create_vault(
+        pass1: &str,
+        pass2: &str,
+        m: u32,
+        t: u32,
+    ) -> Result<JsValue, String> {
         let mut s_mix = [0u8; 64];
         let mut s_argon = [0u8; 64];
         getrandom::fill(&mut s_mix).map_err(|e| e.to_string())?;
         getrandom::fill(&mut s_argon).map_err(|e| e.to_string())?;
 
-        let mut raw_master_key = derive_master_key(pass1, pass2, &s_mix, &s_argon)?;
+        let mut raw_master_key = derive_master_key(pass1, pass2, &s_mix, &s_argon, m, t)?;
         let mut ephemeral_mask = [0u8; 32];
         getrandom::fill(&mut ephemeral_mask).map_err(|e| e.to_string())?;
 
@@ -102,6 +114,8 @@ impl UwuCore {
             auth_hash,
             salt_mix: s_mix.to_vec(),
             salt_argon: s_argon.to_vec(),
+            argon_m: m,
+            argon_t: t,
         };
         let manifest_bytes = rmp_serde::to_vec(&manifest).map_err(|e| e.to_string())?;
 
@@ -129,8 +143,14 @@ impl UwuCore {
             return Err("Invalid vault manifest signature".to_string());
         }
 
-        let mut raw_master_key =
-            derive_master_key(pass1, pass2, &manifest.salt_mix, &manifest.salt_argon)?;
+        let mut raw_master_key = derive_master_key(
+            pass1,
+            pass2,
+            &manifest.salt_mix,
+            &manifest.salt_argon,
+            manifest.argon_m,
+            manifest.argon_t,
+        )?;
 
         let mut auth_check = *blake3::keyed_hash(&raw_master_key, b"UWU_AUTH_CHECK").as_bytes();
         if auth_check != manifest.auth_hash {
@@ -153,6 +173,16 @@ impl UwuCore {
             masked_key,
             ephemeral_mask,
         })
+    }
+
+    #[wasm_bindgen]
+    pub fn test_performance(m: u32, t: u32) -> Result<(), String> {
+        let p1 = "benchmark_pass_1";
+        let p2 = "benchmark_pass_2";
+        let s_mix = [0u8; 64];
+        let s_argon = [0u8; 64];
+        derive_master_key(p1, p2, &s_mix, &s_argon, m, t)?;
+        Ok(())
     }
 
     #[wasm_bindgen]
