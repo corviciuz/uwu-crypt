@@ -10,18 +10,22 @@
 
 The engine is built on **Rust** and compiled into **WebAssembly (WASM)**, providing both near-native performance and strict memory isolation from the main JavaScript thread.
 
-- **Key Derivation (KDF)**: Utilizes **Argon2id** with user-customizable security parameters (Memory: 32MB–1024MB, Iterations: 2–10) for extreme resistance against GPU-based brute-force and side-channel attacks.
-- **Authenticated Encryption (AEAD)**: Employs **XChaCha20-Poly1305** with 192-bit nonces, ensuring nonce-reuse resistance and verifiable data integrity.
-- **ZSTD Compression**: Integrated **Zstd** (levels 1-22) performed before the encryption cycle to minimize the storage footprint of compressed encrypted data.
+- **Key Derivation (KDF)**: Utilizes the **Double-Argon Single-Password (DAS)** architecture. A single master password is expanded via **BLAKE3** into two independent 128-bit seeds, each undergoing a sequential **Argon2id** cycle with customizable security parameters (Memory: 32MB–1024MB, Iterations: 2–10). This effectively doubles the memory-hard cost for attackers compared to standard single-pass KDFs.
+- **Authenticated Encryption (AEAD)**: Employs **XChaCha20-Poly1305** with 192-bit random nonces, ensuring absolute nonce-reuse resistance and verifiable data integrity.
+- **ZSTD Compression**: Integrated **Zstd** (levels 1-22) performed before the encryption cycle to obfuscate data patterns and minimize storage footprint.
 
 ### 2. Initialization & Security Benchmarking
 
-The vault initialization process provides built-in tools to help users select the optimal balance between performance and security:
+The vault initialization process provides built-in diagnostic tools to help users select the optimal balance between performance and security:
 
-- **Performance Dry-run**: A non-destructive benchmark that runs the Argon2id derivation with chosen parameters on the current device to measure real-world verification time.
-- **Scientific Brute-force Estimation**: A mathematically rigorous estimation of password strength based on the memory-bandwidth bottleneck of an attacker. It provides cracking time estimates for:
-    - **1,000x NVIDIA RTX 5090 GPUs** (~1.8 PB/s total bandwidth).
-    - **1x Frontier Supercomputer** (~120 PB/s total HBM bandwidth).
+- **Performance Dry-run**: A non-destructive benchmark that runs the full DAS pipeline (two Argon2id cycles) on the current device to measure real-world verification time.
+- **Scientific Brute-force Estimation**: A mathematically rigorous estimation of password strength based on the memory-bandwidth bottleneck of an attacker. Our model assumes a realistic **25-30% memory efficiency** factor on GPUs due to inherent Argon2id bottlenecks:
+    - **Warp Divergence**: GPUs perform threads in groups (warps). Since Argon2id uses data-dependent random access, different threads in a warp will inevitably request different memory blocks, breaking hardware parallelization.
+    - **TLB Misses & Bank Conflicts**: Frequent random jumps across a large memory space (e.g., 512MB) cause constant cache misses and saturate the VRAM controller, making brute-force attempts on high-end hardware extremely expensive.
+- **Hardware Projections (Baseline: 12-char Alphanumeric / 8GB DAS Traffic)**:
+    - **PC Desktop (RTX 4090)**: ~31 attempts/s (~1.2 Trillion Years).
+    - **1,000x RTX 5090 Cluster**: ~60,000 attempts/s (~660 Million Years).
+    - **1x Frontier Supercomputer**: ~4,000,000 attempts/s (~9.8 Million Years).
 - **Dynamic Entropy Analysis**: Real-time bit-entropy calculation based on character set variety (lowercase, uppercase, digits, and symbols) to ensure strong master keys. (◕‿◕)
 
 ### 3. Secure Memory Strategy (RAM Hardening)
