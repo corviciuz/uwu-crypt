@@ -61,7 +61,7 @@ export class VaultManager {
             this.sendMessage('INIT', { wasmBuffer: wasmContent });
         } catch (err: any) {
             this.rejectReady(err);
-            new Notice(`Failed to load UWU Crypt Worker: ${err.message}`);
+            new Notice(`(⊙ˍ⊙) Failed to load UWU Crypt Worker: ${err.message}`);
             console.error(err);
         }
     }
@@ -76,9 +76,9 @@ export class VaultManager {
         });
     }
 
-    async createVault(pass1: string, pass2: string, m: number, t: number): Promise<Uint8Array> {
+    async createVault(password: string, m: number, t: number): Promise<Uint8Array> {
         await this.readyPromise;
-        const { manifest } = await this.sendMessage('CREATE', { pass1, pass2, m, t });
+        const { manifest } = await this.sendMessage('CREATE', { password, m, t });
         await this.saveManifest(manifest);
         this.isLocked = false;
         this.plugin.app.workspace.trigger('uwu-crypt:unlock');
@@ -86,11 +86,11 @@ export class VaultManager {
         return manifest;
     }
 
-    async unlockVault(pass1: string, pass2: string): Promise<void> {
+    async unlockVault(password: string): Promise<void> {
         await this.readyPromise;
         const manifest = await this.getManifest();
         if (!manifest) throw new Error('No vault configuration found');
-        await this.sendMessage('UNLOCK', { pass1, pass2, payload: manifest });
+        await this.sendMessage('UNLOCK', { password, payload: manifest });
         this.isLocked = false;
         this.plugin.app.workspace.trigger('uwu-crypt:unlock');
         this.startSessionTimer();
@@ -196,7 +196,7 @@ export class VaultManager {
             }
             return bytes;
         } catch (e) {
-            console.error("Failed to decode base64 manifest", e);
+            console.error("(⊙ˍ⊙) Failed to decode base64 manifest", e);
             return null;
         }
     }

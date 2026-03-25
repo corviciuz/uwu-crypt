@@ -23,7 +23,9 @@ pub struct VaultManifest {
     #[serde(with = "serde_bytes")]
     salt_mix: Vec<u8>,
     #[serde(with = "serde_bytes")]
-    salt_argon: Vec<u8>,
+    salt_argon1: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    salt_argon2: Vec<u8>,
     pub argon_m: u32,
     pub argon_t: u32,
 }
@@ -60,38 +62,48 @@ fn derive_argon2id(password: &[u8], salt: &[u8], m: u32, t: u32) -> Result<[u8; 
 }
 
 fn derive_master_key(
-    p1: &str,
-    p2: &str,
+    password: &str,
     s_mix: &[u8],
-    s_argon: &[u8],
+    s_argon1: &[u8],
+    s_argon2: &[u8],
     m: u32,
     t: u32,
 ) -> Result<[u8; 32], String> {
+    // 1. Entropy Expansion via BLAKE3
     let mut hasher = blake3::Hasher::new();
-    hasher.update(p1.as_bytes());
-    hasher.update(p2.as_bytes());
+    hasher.update(password.as_bytes());
     hasher.update(s_mix);
-    let mut mixed_seed = *hasher.finalize().as_bytes();
-    let key = derive_argon2id(&mixed_seed, s_argon, m, t)?;
-    mixed_seed.zeroize();
-    Ok(key)
+    let mut seed = *hasher.finalize().as_bytes();
+
+    // 2. Dual-Track Hardening
+    // Split 32-byte seed into two 16-byte independent inputs
+    let h1 = derive_argon2id(&seed[0..16], s_argon1, m, t)?;
+    let h2 = derive_argon2id(&seed[16..32], s_argon2, m, t)?;
+    seed.zeroize();
+
+    // 3. Final Master Key mixing
+    let mut final_hasher = blake3::Hasher::new();
+    final_hasher.update(&h1);
+    final_hasher.update(&h2);
+    Ok(*final_hasher.finalize().as_bytes())
 }
 
 #[wasm_bindgen]
 impl UwuCore {
     #[wasm_bindgen]
     pub async fn create_vault(
-        pass1: &str,
-        pass2: &str,
+        password: &str,
         m: u32,
         t: u32,
     ) -> Result<JsValue, String> {
         let mut s_mix = [0u8; 64];
-        let mut s_argon = [0u8; 64];
+        let mut s_argon1 = [0u8; 64];
+        let mut s_argon2 = [0u8; 64];
         getrandom::fill(&mut s_mix).map_err(|e| e.to_string())?;
-        getrandom::fill(&mut s_argon).map_err(|e| e.to_string())?;
+        getrandom::fill(&mut s_argon1).map_err(|e| e.to_string())?;
+        getrandom::fill(&mut s_argon2).map_err(|e| e.to_string())?;
 
-        let mut raw_master_key = derive_master_key(pass1, pass2, &s_mix, &s_argon, m, t)?;
+        let mut raw_master_key = derive_master_key(password, &s_mix, &s_argon1, &s_argon2, m, t)?;
         let mut ephemeral_mask = [0u8; 32];
         getrandom::fill(&mut ephemeral_mask).map_err(|e| e.to_string())?;
 
@@ -113,7 +125,8 @@ impl UwuCore {
             signature,
             auth_hash,
             salt_mix: s_mix.to_vec(),
-            salt_argon: s_argon.to_vec(),
+            salt_argon1: s_argon1.to_vec(),
+            salt_argon2: s_argon2.to_vec(),
             argon_m: m,
             argon_t: t,
         };
@@ -132,8 +145,7 @@ impl UwuCore {
 
     #[wasm_bindgen]
     pub async fn unlock_vault(
-        pass1: &str,
-        pass2: &str,
+        password: &str,
         manifest_bytes: &[u8],
     ) -> Result<UwuCore, String> {
         let manifest: VaultManifest =
@@ -144,10 +156,10 @@ impl UwuCore {
         }
 
         let mut raw_master_key = derive_master_key(
-            pass1,
-            pass2,
+            password,
             &manifest.salt_mix,
-            &manifest.salt_argon,
+            &manifest.salt_argon1,
+            &manifest.salt_argon2,
             manifest.argon_m,
             manifest.argon_t,
         )?;
@@ -156,7 +168,7 @@ impl UwuCore {
         if auth_check != manifest.auth_hash {
             auth_check.zeroize();
             raw_master_key.zeroize();
-            return Err("Invalid passwords".to_string());
+            return Err("Invalid password".to_string());
         }
         auth_check.zeroize();
 
@@ -177,11 +189,11 @@ impl UwuCore {
 
     #[wasm_bindgen]
     pub fn test_performance(m: u32, t: u32) -> Result<(), String> {
-        let p1 = "benchmark_pass_1";
-        let p2 = "benchmark_pass_2";
+        let pass = "benchmark_password";
         let s_mix = [0u8; 64];
-        let s_argon = [0u8; 64];
-        derive_master_key(p1, p2, &s_mix, &s_argon, m, t)?;
+        let s_argon1 = [0u8; 64];
+        let s_argon2 = [0u8; 64];
+        derive_master_key(pass, &s_mix, &s_argon1, &s_argon2, m, t)?;
         Ok(())
     }
 

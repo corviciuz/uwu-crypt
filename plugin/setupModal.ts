@@ -53,8 +53,7 @@ export class SetupModal extends Modal {
             return row;
         };
 
-        createRow("Password 1", "Main key phrase.", "...", (v) => this.pass1 = v);
-        createRow("Password 2", "Secondary phrase.", "...", (v) => this.pass2 = v);
+        createRow("Master Vault Password", "Enter your master key phrase.", "...", (v) => this.pass1 = v);
 
         if (this.isFirstTime) {
             contentEl.createEl("h3", { text: "Argon2id Parameters", attr: { style: "margin-top: 20px;" } });
@@ -133,9 +132,9 @@ export class SetupModal extends Modal {
                         this.startProcessing();
                         try {
                             if (this.isFirstTime) {
-                                await this.vaultManager.createVault(this.pass1, this.pass2, this.argonM * 1024, this.argonT);
+                                await this.vaultManager.createVault(this.pass1, this.argonM * 1024, this.argonT);
                             } else {
-                                await this.vaultManager.unlockVault(this.pass1, this.pass2);
+                                await this.vaultManager.unlockVault(this.pass1);
                             }
                             this.resolved = true;
                             if (this.onResolved) this.onResolved();
@@ -175,9 +174,9 @@ export class SetupModal extends Modal {
         if (!this.estimationEl) return;
         this.estimationEl.empty();
         
-        const combinedPass = this.pass1 + this.pass2;
+        const combinedPass = this.pass1;
         if (combinedPass.length === 0) {
-            this.estimationEl.createEl("p", { text: "Enter passwords to see brute-force estimation.", attr: { style: "font-style: italic; opacity: 0.7;" } });
+            this.estimationEl.createEl("p", { text: "Enter password to see brute-force estimation.", attr: { style: "font-style: italic; opacity: 0.7;" } });
             return;
         }
 
@@ -197,18 +196,21 @@ export class SetupModal extends Modal {
         const frontierBandwidth = 120.3e15; // ~120 PB/s
 
         // 3. Argon2id Cost (Memory total access per attempt)
+        // DAS Logic: 2x Argon2 runs per attempt
         const memorySizeBytes = this.argonM * 1024 * 1024;
-        const bytesPerAttempt = memorySizeBytes * 2 * this.argonT;
+        const bytesPerAttempt = (memorySizeBytes * 2 * this.argonT) * 2; 
 
-        // 4. Maximum Throughput
-        const thousandRtxRate = totalRtxBandwidth / bytesPerAttempt;
-        const frontierRate = frontierBandwidth / bytesPerAttempt;
+        // 4. Maximum Throughput (Adjusted for real-world efficiency ~25%)
+        const efficiency = 0.30;
+        const thousandRtxRate = (totalRtxBandwidth / bytesPerAttempt) * efficiency;
+        const frontierRate = (frontierBandwidth / bytesPerAttempt) * efficiency;
 
         const formatTime = (seconds: number) => {
             if (!isFinite(seconds) || seconds > 31536000 * 1e15) return "> 1 quadrillion years";
+            if (seconds > 31536000 * 1e12) return `${Math.round(seconds / (31536000 * 1e12))} trillion years`;
             if (seconds > 31536000 * 1e9) return `${Math.round(seconds / (31536000 * 1e9))} billion years`;
             if (seconds > 31536000 * 1e6) return `${Math.round(seconds / (31536000 * 1e6))} million years`;
-            if (seconds > 31536000) return `${Math.round(seconds / 31536000)} years`;
+            if (seconds > 31536000) return `${Math.round(seconds / 31536000 * 10) / 10} years`;
             if (seconds > 86400) return `${Math.round(seconds / 86400)} days`;
             if (seconds > 3600) return `${Math.round(seconds / 3600)} hours`;
             if (seconds > 60) return `${Math.round(seconds / 60)} minutes`;
