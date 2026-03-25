@@ -115,7 +115,7 @@ export default class UwuCryptPlugin extends Plugin {
 
                     if (shouldEncrypt && !isEncrypted) {
                         await this.fileProcessor.processFile(file, true);
-                        new Notice(`(⊙ˍ⊙) Protected moved file ${file.name}`);
+                        new Notice(`(⌐■_■) Protected moved file ${file.name}`);
                     }
                 }
             })

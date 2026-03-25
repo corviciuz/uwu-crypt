@@ -1,29 +1,46 @@
-# UWU Crypt - High-performance Vault Encryption
+# UWU-Crypt
 
-A technical implementation of a transparent encryption layer for Obsidian, utilizing a Rust WebAssembly core for cryptographic operations and binary data manipulation.
+**UWU-Crypt** is a high-performance transparent encryption extension for Obsidian, designed to provide seamless on-the-fly data protection without altering file extensions or the underlying vault structure. By combining a robust Rust/WebAssembly cryptographic core with deep integration into the Obsidian I/O API, this solution ensures comprehensive data security including transparent media handling via lazy decryption, automatic protection of moved files, and strict blocking of destructive operations in protected areas when the vault is locked. (\*ゝω・)ﾉ
 
-## Technical Architecture
+---
 
-### Cryptographic Primitive Stack
+## Technical Architecture & Core Technologies
 
-- **Key Derivation (KDF)**: Argon2id (M=524288, T=4, P=1, L=32) for strong resistance against side-channel and GPU-based brute-force attacks.
-- **Encryption Algorithm**: XChaCha20-Poly1305 (AEAD) for high-performance authenticated encryption with 192-bit nonces, ensuring nonce-reuse resistance.
-- **Key Fingerprinting**: BLAKE3-based keyed hashes for internal sub-key derivation (Master Key -> File Key).
-- **ZSTD Compression**: Integrated ZSTD (levels 1-22) before encryption to minimize the storage footprint of compressed data.
+### 1. Cryptographic Primitive Stack (WASM Core)
 
-### Secure Session Strategy
+The engine is built on **Rust** and compiled into **WebAssembly (WASM)**, providing both near-native performance and strict memory isolation from the main JavaScript thread.
 
-- **Master Key Security**: The derived master key is stored in memory using XOR-masking to mitigate cold-boot or memory-dump exploits.
-- **Secure Memory Handling**: Critical buffers in the Rust core are wrapped in `ZeroizeOnDrop` to ensure memory is cleared immediately after cryptographic cycles.
-- **Session Lifespan**: Automatic vault locking via a session timer and manual encryption/decryption control through context-menu actions.
+- **Key Derivation (KDF)**: Utilizes **Argon2id** (Parameters: M=512MB, T=4, P=1, L=32) for strong resistance against GPU-based brute-force and side-channel attacks.
+- **Authenticated Encryption (AEAD)**: Employs **XChaCha20-Poly1305** with 192-bit nonces, ensuring nonce-reuse resistance and verifiable data integrity.
+- **ZSTD Compression**: Integrated **Zstd** (levels 1-22) performed before the encryption cycle to minimize the storage footprint of compressed encrypted data.
 
-### Data Injection & I/O Hooks
+### 2. Secure Memory Strategy (RAM Hardening)
 
-- **Transparent DataAdapter Interception**: The plugin hooks into Obsidian's `DataAdapter` (`read`, `readBinary`, `write`, `writeBinary`, `process`) to provide seamless on-the-fly decryption without unencrypted data ever touching the physical drive.
-- **Selective Encryption Paths**: Flexible configuration allows for global vault encryption or targeted recursive encryption of specific folder paths.
-- **Image Rendering**: Encrypted image assets are decrypted into memory-only Blob URLs via a dedicated `MutationObserver` and `MarkdownPostProcessor` pipeline, preventing unauthorized access in the editor and file explorer.
+The plugin implements a "clean memory" strategy to minimize the lifespan of sensitive data in RAM:
 
-### Binary Storage Format
+- **Zeroization**: Explicit memory clearing (zeroing out buffers) for all master keys, session sub-keys, and decrypted plaintext fragments immediately upon completion of cryptographic cycles or vault locking. ( `◡` )
+- **XOR Masking**: Decrypted data within the internal cache is stored using ephemeral XOR-masking. Original buffers are only reconstructed momentarily before being passed to the UI.
+- **System Isolation**: Cryptographic secrets never leave the WASM memory space; JS access is strictly limited via a defined boundary API.
 
-- **Serialization**: Optimized MessagePack format using `serde-bytes` for efficient binary storage (`BIN 8/16/32` headers).
-- **File Structure**: Each encrypted file package includes a fixed-size header (16-byte signature), followed by the salt (32 bytes), nonce (24 bytes), and the compressed ciphertext.
+### 3. I/O Interception & DataAdapter Hooking
+
+Instead of a virtual filesystem, UWU-Crypt performs deep interception at the **DataAdapter** layer of the Obsidian application:
+
+- **Monkey-patching**: Base methods (`read`, `write`, `readBinary`, `writeBinary`, `append`, and `process`) are patched to perform on-the-fly encryption/decryption transparently to other plugins and the Obsidian core.
+- **Atomic Operations**: Encryption is performed atomically before disk commit, ensuring that plaintext is never written to physical storage.
+- **Structural Integrity**: The plugin intercepts destructive calls like `remove`, `rename`, and `mkdir` within protected paths, blocking them if the vault is currently locked to prevent accidental data loss.
+
+### 4. UI & Rendering Optimizations
+
+Modern web technologies are utilized to ensure a smooth, professional user experience:
+
+- **Lazy Decryption (IntersectionObserver)**: Encrypted media assets (images, etc.) are only decrypted and rendered when they enter the user's viewport, significantly reducing CPU overloads and RAM consumption for large notes.
+- **Persistent View Containers**: `UwuView` utilizes a static DOM structure that toggles visibility instead of rebuilding the nodes, eliminating the "blank frame" flicker during tab switching.
+- **Implicit View Selection**: Instantaneous leaf-level hooking of `setViewState` allows the plugin to redirect Obsidian to the "Locked" view before any markdown rendering occurs, providing a flicker-free transition for protected files. (・∀・)ノ
+
+### 5. Stealth Mode & Storage Format
+
+Files on disk retain their original filenames and extensions to maintain compatibility with external backup tools and avoid breaking internal Obsidian linking systems:
+
+- **Binary Signature**: Every encrypted file starts with a unique 16-byte `UWU_V1` signature for instant identification.
+- **Serialization**: Salt and encryption parameters are packed using the **MessagePack** format, ensuring a minimal metadata overhead.
