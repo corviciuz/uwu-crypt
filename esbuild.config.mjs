@@ -36,7 +36,10 @@ const ctx = await esbuild.context({
 		'@lezer/lr'
 	],
 	format: 'cjs',
-	target: 'es2018',
+	target: 'es2022',
+	logOverride: {
+		'empty-import-meta': 'silent'
+	},
 	logLevel: "info",
 	sourcemap: prod ? false : 'inline',
 	treeShaking: true,

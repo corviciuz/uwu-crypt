@@ -1,0 +1,68 @@
+.uwu-locked-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    width: 100%;
+    text-align: center;
+    background-color: var(--background-primary);
+    padding: 2rem;
+}
+
+.uwu-locked-content {
+    max-width: 400px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 3rem;
+    border-radius: 16px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+}
+
+.uwu-lock-icon-large {
+    color: var(--color-accent);
+}
+
+.uwu-lock-icon-large svg {
+    width: 64px;
+    height: 64px;
+}
+
+.uwu-locked-title {
+    margin: 0;
+    font-size: 1.8rem;
+    color: var(--text-normal);
+}
+
+.uwu-locked-subtitle {
+    white-space: pre-wrap;
+    margin: 0;
+    font-size: 1rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+.uwu-unlock-button {
+    background-color: var(--interactive-accent);
+    color: var(--text-on-accent);
+    padding: 0.8rem 2rem;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 1.1rem;
+    cursor: pointer;
+    border: none;
+    transition: transform 0.1s ease, background-color 0.2s ease;
+}
+
+.uwu-unlock-button:hover {
+    background-color: var(--interactive-accent-hover);
+    transform: scale(1.02);
+}
+
+.uwu-unlock-button:active {
+    transform: scale(0.98);
+}

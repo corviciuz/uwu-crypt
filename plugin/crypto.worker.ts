@@ -24,11 +24,17 @@ self.onmessage = async (e) => {
             case 'CREATE':
                 const [newSession, manifest] = await UwuCore.create_vault(payload.pass1, payload.pass2);
                 core = newSession;
+                // Zeroize passwords in worker memory
+                delete payload.pass1;
+                delete payload.pass2;
                 self.postMessage({ id, type: 'CREATED', payload: { manifest } });
                 break;
 
             case 'UNLOCK':
                 core = await UwuCore.unlock_vault(payload.pass1, payload.pass2, payload.payload);
+                // Zeroize passwords in worker memory
+                delete payload.pass1;
+                delete payload.pass2;
                 self.postMessage({ id, type: 'UNLOCKED' });
                 break;
 

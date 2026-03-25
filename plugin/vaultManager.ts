@@ -193,7 +193,7 @@ export class VaultManager {
         if (timeout > 0) {
             this.sessionTimeoutTimer = window.setTimeout(() => {
                 this.lockVault();
-                new Notice('UWU Crypt: Session expired');
+                new Notice('(⊙ˍ⊙) Session expired');
             }, timeout);
         }
     }

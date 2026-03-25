@@ -19,12 +19,14 @@ export class SetupModal extends Modal {
 
     onOpen() {
         const { contentEl } = this;
-        contentEl.createEl("h2", { text: this.isFirstTime ? "Welcome to UWU Crypt" : "Unlock Vault" });
+        contentEl.createEl("h2", { text: this.isFirstTime ? "Welcome to UWU-Crypt" : "Unlock Vault" });
         
         if (this.isFirstTime) {
             contentEl.createEl("p", { 
-                text: "WARNING: You are about to set up a new encryption vault. This involves 2 passwords. " +
-                      "If you lose these passwords OR delete the .uwu folder, you WILL lose your data permanently."
+                text: "You are about to set up a new encryption vault. This involves 2 passwords. " +
+                      "If you lose these passwords OR delete the .uwu folder, you WILL lose your data permanently." +
+                      "Depending on your hardware, this may take a while." +
+                      "Be patient (✿◡‿◡)"
             });
         }
 
@@ -71,6 +73,10 @@ export class SetupModal extends Modal {
         if (!this.resolved && this.onRejected) {
             this.onRejected(new Error("User cancelled vault unlock"));
         }
+        // Zeroize passwords on modal close
+        this.pass1 = "";
+        this.pass2 = "";
+        
         const { contentEl } = this;
         contentEl.empty();
     }

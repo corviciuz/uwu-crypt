@@ -10,6 +10,10 @@ export class ImageProcessor {
         return this.plugin.app;
     }
 
+    hasCached(path: string): boolean {
+        return this.blobCache.has(path);
+    }
+
     async getDecryptedBlobUrl(file: TFile): Promise<string | null> {
         if (this.blobCache.has(file.path)) {
             return this.blobCache.get(file.path)!;
@@ -43,11 +47,19 @@ export class ImageProcessor {
         switch (ext) {
             case 'png': return 'image/png';
             case 'jpg':
-            case 'jpeg': return 'image/jpeg';
+            case 'jpeg':
+            case 'jfif': return 'image/jpeg';
             case 'gif': return 'image/gif';
             case 'webp': return 'image/webp';
             case 'svg': return 'image/svg+xml';
             case 'bmp': return 'image/bmp';
+            case 'avif': return 'image/avif';
+            case 'heic': return 'image/heic';
+            case 'heif': return 'image/heif';
+            case 'jxl': return 'image/jxl';
+            case 'tif':
+            case 'tiff': return 'image/tiff';
+            case 'ico': return 'image/x-icon';
             default: return 'application/octet-stream';
         }
     }

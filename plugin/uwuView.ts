@@ -1,4 +1,4 @@
-import { FileView, TFile, WorkspaceLeaf, setIcon, MarkdownRenderer } from "obsidian";
+import { FileView, TFile, WorkspaceLeaf, setIcon, MarkdownRenderer, Notice } from "obsidian";
 import { VaultManager } from "./vaultManager.ts";
 
 export const UWU_VIEW_TYPE = "uwu-view";
@@ -16,8 +16,19 @@ export class UwuView extends FileView {
         return this.file?.name || "Encrypted File";
     }
 
+    private lockedEl: HTMLElement | null = null;
+    private decryptedEl: HTMLElement | null = null;
+    private errorEl: HTMLElement | null = null;
+
     async onOpen() {
+        this.contentEl.classList.add("uwu-view-container");
         this.render();
+    }
+
+    async onClose() {
+        this.lockedEl = null;
+        this.decryptedEl = null;
+        this.errorEl = null;
     }
 
     async onLoadFile(file: TFile): Promise<void> {
@@ -26,17 +37,13 @@ export class UwuView extends FileView {
     }
 
     private async render() {
-        const container = this.contentEl;
-        container.empty();
-        container.classList.add("uwu-view-container");
-
         if (!this.file) return;
 
         // Check if file is encrypted (signature check)
         const isEncrypted = await this.isEncryptedFile(this.file);
         
         if (!isEncrypted) {
-             container.createEl("p", { text: "This file is not encrypted." });
+             this.showError("This file is not encrypted.");
              return;
         }
 
@@ -44,6 +51,18 @@ export class UwuView extends FileView {
             await this.renderDecrypted();
         } else {
             this.renderLocked();
+        }
+    }
+
+    private showError(message: string) {
+        if (this.lockedEl) this.lockedEl.style.display = 'none';
+        if (this.decryptedEl) this.decryptedEl.style.display = 'none';
+        
+        if (!this.errorEl) {
+            this.errorEl = this.contentEl.createEl("p", { text: message, cls: "uwu-error-message" });
+        } else {
+            this.errorEl.textContent = message;
+            this.errorEl.style.display = 'block';
         }
     }
 
@@ -64,18 +83,32 @@ export class UwuView extends FileView {
     }
 
     private renderLocked() {
-        const div = this.contentEl.createDiv({ cls: "uwu-locked-ui" });
-        const icon = div.createDiv({ cls: "uwu-lock-icon" });
-        setIcon(icon, "lock");
-        
-        div.createEl("p", { text: "This file is encrypted." });
-        const btn = div.createEl("button", { text: "Unlock Vault" });
-        btn.addEventListener("click", () => {
-             (this.app as any).commands.executeCommandById("uwu-crypt:unlock-vault");
-        });
+        if (this.decryptedEl) this.decryptedEl.style.display = 'none';
+        if (this.errorEl) this.errorEl.style.display = 'none';
+
+        if (!this.lockedEl) {
+            this.lockedEl = this.contentEl.createDiv({ cls: "uwu-locked-container" });
+            const inner = this.lockedEl.createDiv({ cls: "uwu-locked-content" });
+            
+            const icon = inner.createDiv({ cls: "uwu-lock-icon-large" });
+            setIcon(icon, "lock");
+            
+            inner.createEl("h2", { text: "File is Encrypted", cls: "uwu-locked-title" });
+            inner.createEl("p", { text: "Protected by UWU-Crypt\n(⌐■_■)", cls: "uwu-locked-subtitle" });
+            
+            const btn = inner.createEl("button", { text: "Unlock Vault", cls: "uwu-unlock-button" });
+            btn.addEventListener("click", () => {
+                 (this.app as any).commands.executeCommandById("uwu-crypt:unlock-vault");
+            });
+        } else {
+            this.lockedEl.style.display = 'flex';
+        }
     }
 
     private async renderDecrypted() {
+        if (this.lockedEl) this.lockedEl.style.display = 'none';
+        if (this.errorEl) this.errorEl.style.display = 'none';
+
         try {
             const encryptedData = await this.app.vault.readBinary(this.file!);
             const sig = this.vaultManager.signature;
@@ -83,11 +116,18 @@ export class UwuView extends FileView {
             const plaintext = await this.vaultManager.decrypt(ciphertext);
             const content = new TextDecoder().decode(plaintext);
 
-            const div = this.contentEl.createDiv({ cls: "uwu-decrypted-content" });
+            if (!this.decryptedEl) {
+                this.decryptedEl = this.contentEl.createDiv({ cls: "uwu-decrypted-content" });
+            } else {
+                this.decryptedEl.empty();
+                this.decryptedEl.style.display = 'block';
+            }
+
             // Use Obsidian's MarkdownRenderer for proper preview
-            await MarkdownRenderer.render(this.app, content, div, this.file?.path || "", this);
+            await MarkdownRenderer.render(this.app, content, this.decryptedEl, this.file?.path || "", this);
         } catch (err: any) {
-            this.contentEl.createEl("p", { text: `Decryption failed: ${err.message}`, cls: "error" });
+            new Notice(`(⊙ˍ⊙) Decryption failed for ${this.file?.name}: ${err.message}`);
+            this.renderLocked();
         }
     }
 }
