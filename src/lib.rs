@@ -170,7 +170,7 @@ impl UwuCore {
         let file_key = blake3::keyed_hash(&unmasked_key, &file_salt);
         unmasked_key.zeroize();
 
-        let compressed = encode_all(data, zstd_level).map_err(|e| e.to_string())?;
+        let mut compressed = encode_all(data, zstd_level).map_err(|e| e.to_string())?;
         let cipher =
             XChaCha20Poly1305::new_from_slice(file_key.as_bytes()).map_err(|e| e.to_string())?;
 
@@ -187,7 +187,9 @@ impl UwuCore {
             nonce,
             ciphertext,
         };
-        rmp_serde::to_vec(&package).map_err(|e| e.to_string())
+        let res = rmp_serde::to_vec(&package).map_err(|e| e.to_string());
+        compressed.zeroize();
+        res
     }
 
     #[wasm_bindgen]
@@ -210,11 +212,23 @@ impl UwuCore {
             .try_into()
             .map_err(|_| "Invalid nonce length")?;
 
-        let compressed = cipher
+        let mut compressed = cipher
             .decrypt(&x_nonce, package.ciphertext.as_slice())
             .map_err(|e| format!("File decryption failed: {}", e))?;
 
-        decode_all(compressed.as_slice()).map_err(|e| e.to_string())
+        let decompressed = decode_all(compressed.as_slice()).map_err(|e| e.to_string());
+        compressed.zeroize();
+        decompressed
+    }
+
+    #[wasm_bindgen]
+    pub fn mask_data(&self, data: &mut [u8], mask: &[u8]) {
+        if mask.is_empty() {
+            return;
+        }
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte ^= mask[i % mask.len()];
+        }
     }
 }
 

@@ -36,7 +36,7 @@ export default class UwuCryptPlugin extends Plugin {
     private originalAdapterWriteBinary!: any;
     private originalAdapterProcess!: any;
 
-    private decryptionCache = new Map<string, Promise<Uint8Array>>();
+    private decryptionCache = new Map<string, Promise<{ data: Uint8Array, mask: Uint8Array }>>();
 
     async onload() {
         await this.loadSettings();
@@ -196,8 +196,12 @@ export default class UwuCryptPlugin extends Plugin {
                     if (!this.vaultManager.unlocked()) {
                         await this.vaultManager.requestUnlock();
                     }
-                    const decrypted = await this.getCachedDecryption(path, buffer);
-                    return new TextDecoder().decode(decrypted);
+                    const { data, mask } = await this.getCachedDecryption(path, buffer);
+                    const unmasked = new Uint8Array(data);
+                    this.maskData(unmasked, mask);
+                    const text = new TextDecoder().decode(unmasked);
+                    unmasked.fill(0);
+                    return text;
                 }
             } catch {}
             return this.originalAdapterRead.call(adapter, path);
@@ -206,15 +210,20 @@ export default class UwuCryptPlugin extends Plugin {
         adapter.readBinary = async (path: string): Promise<ArrayBuffer> => {
             const buffer = await this.originalAdapterReadBinary.call(adapter, path);
             if (!this.isProcessing && this.isEncrypted(buffer)) {
-                if (!this.vaultManager.unlocked()) {
-                    await this.vaultManager.requestUnlock();
-                }
-                const decrypted = await this.getCachedDecryption(path, buffer);
-                // Return a clean copy of the ArrayBuffer
-                return decrypted.buffer.slice(decrypted.byteOffset, decrypted.byteOffset + decrypted.byteLength) as ArrayBuffer;
+            if (!this.vaultManager.unlocked()) {
+                await this.vaultManager.requestUnlock();
             }
-            return buffer;
-        };
+            const { data, mask } = await this.getCachedDecryption(path, buffer);
+            // Unmask on the fly
+            const unmasked = new Uint8Array(data);
+            this.maskData(unmasked, mask);
+            
+            const result = unmasked.buffer.slice(unmasked.byteOffset, unmasked.byteOffset + unmasked.byteLength) as ArrayBuffer;
+            unmasked.fill(0); // Clear sensitive data
+            return result;
+        }
+        return buffer;
+    };
 
         adapter.write = async (path: string, data: string, options?: DataWriteOptions): Promise<void> => {
             if (!this.isProcessing && this.fileProcessor.shouldEncryptPath(path)) {
@@ -270,7 +279,7 @@ export default class UwuCryptPlugin extends Plugin {
         return true;
     }
 
-    private async getCachedDecryption(path: string, encryptedData: ArrayBuffer): Promise<Uint8Array> {
+    private async getCachedDecryption(path: string, encryptedData: ArrayBuffer): Promise<{ data: Uint8Array, mask: Uint8Array }> {
         const key = path + ":" + encryptedData.byteLength;
         if (this.decryptionCache.has(key)) {
             return this.decryptionCache.get(key)!;
@@ -278,11 +287,39 @@ export default class UwuCryptPlugin extends Plugin {
 
         const sig = this.vaultManager.signature;
         const ciphertext = new Uint8Array(encryptedData).slice(sig.length);
-        const promise = this.vaultManager.decrypt(ciphertext);
+        
+        const promise = (async () => {
+            const plaintext = await this.vaultManager.decrypt(ciphertext);
+            const mask = new Uint8Array(32);
+            crypto.getRandomValues(mask);
+            
+            // Mask the data before storing
+            this.maskData(plaintext, mask);
+            
+            return { data: plaintext, mask };
+        })();
+
         this.decryptionCache.set(key, promise);
         
-        setTimeout(() => this.decryptionCache.delete(key), 1000);
+        setTimeout(() => {
+            const cached = this.decryptionCache.get(key);
+            if (cached) {
+                cached.then(c => {
+                    c.data.fill(0);
+                    c.mask.fill(0);
+                });
+                this.decryptionCache.delete(key);
+            }
+        }, 5000); // Keep in cache for 5 seconds
+        
         return promise;
+    }
+
+    private maskData(data: Uint8Array, mask: Uint8Array) {
+        if (mask.length === 0) return;
+        for (let i = 0; i < data.length; i++) {
+            data[i] ^= mask[i % mask.length];
+        }
     }
 
     private setupImageObserver() {
