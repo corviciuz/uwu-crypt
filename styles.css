@@ -66,3 +66,47 @@
 .uwu-unlock-button:active {
     transform: scale(0.98);
 }
+
+/* Progress UI */
+.uwu-progress-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    gap: 1.5rem;
+}
+
+.uwu-progress-svg {
+    width: 120px;
+    height: 120px;
+    transform: rotate(-90deg);
+}
+
+.uwu-progress-bg {
+    fill: none;
+    stroke: var(--background-modifier-border);
+    stroke-width: 8;
+}
+
+.uwu-progress-bar {
+    fill: none;
+    stroke: var(--interactive-accent);
+    stroke-width: 8;
+    stroke-linecap: round;
+    stroke-dasharray: 251.2; /* 2 * PI * 40 */
+    stroke-dashoffset: 251.2;
+    transition: stroke-dashoffset 0.3s ease;
+}
+
+.uwu-progress-text {
+    font-size: 1.1rem;
+    color: var(--text-normal);
+    font-weight: 500;
+    text-align: center;
+}
+
+.uwu-setup-description {
+    margin-bottom: 2rem;
+    color: var(--text-muted);
+}

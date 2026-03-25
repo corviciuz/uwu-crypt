@@ -247,7 +247,7 @@ export default class UwuCryptPlugin extends Plugin {
         WorkspaceLeaf.prototype.setViewState = function(viewState: any, result?: any) {
             if (!self.vaultManager.unlocked()) {
                 const file = viewState.state?.file;
-                if (viewState.type === 'markdown' && file && self.fileProcessor.shouldEncryptPath(file)) {
+                if (viewState.type !== UWU_VIEW_TYPE && file && self.fileProcessor.shouldEncryptPath(file)) {
                     viewState.type = UWU_VIEW_TYPE;
                 }
             }
