@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "target": "ESNext",
+    "allowJs": true,
+    "noImplicitAny": true,
+    "moduleResolution": "bundler",
+    "lib": ["DOM", "ESNext"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true
+  },
+  "include": ["plugin/**/*.ts"]
+}

@@ -1,0 +1,19 @@
+{
+	"name": "uwu-crypt",
+	"version": "0.1.0",
+	"description": "High-performance file encryption for Obsidian using Rust WASM.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "cross-env RUSTFLAGS=\"-C target-feature=+simd128\" wasm-pack build --target web --release --out-dir pkg && npx tsc && node esbuild.config.mjs production",
+		"wasm:build": "cross-env RUSTFLAGS=\"-C target-feature=+simd128\" wasm-pack build --target web --out-dir pkg"
+	},
+	"devDependencies": {
+		"@types/node": "^25.5.0",
+		"cross-env": "^10.1.0",
+		"esbuild": "^0.27.4",
+		"obsidian": "latest",
+		"tslib": "^2.6.2",
+		"typescript": "^6.0.2"
+	}
+}

@@ -1,0 +1,9 @@
+{
+	"id": "uwu-crypt",
+	"name": "UWU Crypt",
+	"version": "0.1.0",
+	"minAppVersion": "0.15.0",
+	"description": "High-performance file encryption for Obsidian using Rust WASM.",
+	"author": "corviciuz",
+	"authorUrl": "https://github.com/corviciuz"
+}
