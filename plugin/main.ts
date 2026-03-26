@@ -3,7 +3,7 @@ import { VaultManager } from './vaultManager.ts';
 import { FileProcessor } from './fileProcessor.ts';
 import { UwuView, UWU_VIEW_TYPE } from './uwuView.ts';
 import { SetupModal } from './setupModal.ts';
-import { ImageProcessor } from './imageProcessor.ts';
+import { ResourceProcessor } from './resourceProcessor.ts';
 
 interface UwuCryptSettings {
     rememberPassword: boolean;
@@ -11,6 +11,7 @@ interface UwuCryptSettings {
     zstdLevel: number;
     encryptAll: boolean;
     encryptedFolders: string[];
+    showIndicators: boolean;
     manifestBackup: string | null;
 }
 
@@ -20,6 +21,7 @@ const DEFAULT_SETTINGS: UwuCryptSettings = {
     zstdLevel: 8,
     encryptAll: false,
     encryptedFolders: [],
+    showIndicators: true,
     manifestBackup: null
 };
 
@@ -27,7 +29,7 @@ export default class UwuCryptPlugin extends Plugin {
     settings!: UwuCryptSettings;
     vaultManager!: VaultManager;
     fileProcessor!: FileProcessor;
-    imageProcessor!: ImageProcessor;
+    resourceProcessor!: ResourceProcessor;
     isProcessing = false;
 
     private originalAdapterRead!: any;
@@ -41,8 +43,11 @@ export default class UwuCryptPlugin extends Plugin {
     private originalAdapterTrashSystem!: any;
     private originalAdapterRmdir!: any;
     private originalAdapterRename!: any;
+    private originalAdapterGetResourcePath!: any;
     private ribbonIconEl!: HTMLElement;
-    private lazyImageObserver!: IntersectionObserver;
+    private lazyResourceObserver!: IntersectionObserver;
+    private encryptedPaths: Set<string> = new Set();
+    private explorerObserver!: MutationObserver;
     private originalSetViewState!: any;
     private isUpdatingRibbon = false;
 
@@ -53,7 +58,7 @@ export default class UwuCryptPlugin extends Plugin {
 
         this.vaultManager = new VaultManager(this);
         this.fileProcessor = new FileProcessor(this, this.vaultManager, this.settings);
-        this.imageProcessor = new ImageProcessor(this, this.vaultManager, this.isEncrypted.bind(this));
+        this.resourceProcessor = new ResourceProcessor(this, this.vaultManager, this.isEncrypted.bind(this));
 
         this.registerView(
             UWU_VIEW_TYPE,
@@ -62,28 +67,53 @@ export default class UwuCryptPlugin extends Plugin {
 
         // Hook DataAdapter for transparent encryption/decryption
         this.setupHooks();
+        
+        if (this.settings.showIndicators) {
+            this.setupFileExplorerObserver();
+            this.scanVaultForEncryptedFiles();
+        }
 
-        // Image rendering support
+        // Resource rendering support (Images, Audio, Video, PDF)
         this.registerMarkdownPostProcessor((el, ctx) => {
-            const images = el.querySelectorAll('img');
-            images.forEach(async (img) => {
+            // Images
+            el.querySelectorAll('img').forEach(async (img) => {
                 const src = img.getAttribute('src');
                 if (src && (src.startsWith('app://') || src.startsWith('capacitor://') || !src.includes('://'))) {
-                    const path = ctx.sourcePath;
-                    // Try to find the file in the vault
-                    const file = this.app.metadataCache.getFirstLinkpathDest(src, path);
-                    if (file instanceof TFile && this.isImage(file)) {
-                        const blobUrl = await this.imageProcessor.getDecryptedBlobUrl(file);
-                        if (blobUrl) {
-                            img.src = blobUrl;
-                        }
+                    const file = this.app.metadataCache.getFirstLinkpathDest(src, ctx.sourcePath);
+                    if (file instanceof TFile && (this.isImage(file) || file.extension.toLowerCase() === 'svg')) {
+                        const blobUrl = await this.resourceProcessor.getDecryptedBlobUrl(file);
+                        if (blobUrl) img.src = blobUrl;
+                    }
+                }
+            });
+
+            // Audio/Video/Source
+            el.querySelectorAll('audio, video, source').forEach(async (media) => {
+                const src = media.getAttribute('src');
+                if (src) {
+                    const file = this.app.metadataCache.getFirstLinkpathDest(src, ctx.sourcePath);
+                    if (file instanceof TFile) {
+                        const blobUrl = await this.resourceProcessor.getDecryptedBlobUrl(file);
+                        if (blobUrl) (media as any).src = blobUrl;
+                    }
+                }
+            });
+
+            // PDF Embeds & iFrames
+            el.querySelectorAll('embed, iframe').forEach(async (embed) => {
+                const src = embed.getAttribute('src');
+                if (src) {
+                    const file = this.app.metadataCache.getFirstLinkpathDest(src, ctx.sourcePath);
+                    if (file instanceof TFile && file.extension.toLowerCase() === 'pdf') {
+                        const blobUrl = await this.resourceProcessor.getDecryptedBlobUrl(file);
+                        if (blobUrl) embed.setAttribute('src', blobUrl);
                     }
                 }
             });
         });
 
-        this.setupImageObserver();
-        this.setupLazyImageObserver();
+        this.setupResourceObserver();
+        this.setupLazyResourceObserver();
 
         this.ribbonIconEl = this.addRibbonIcon('unlock', 'Unlock Vault', () => {
             if (this.vaultManager.unlocked()) {
@@ -125,6 +155,19 @@ export default class UwuCryptPlugin extends Plugin {
             }
         });
 
+        this.registerEvent(this.app.workspace.on('file-open', async (file) => {
+            if (file instanceof TFile && this.vaultManager.unlocked()) {
+                const ext = file.extension.toLowerCase();
+                const isMedia = ['pdf', 'mp3', 'wav', 'flac', 'm4a', 'ogg', '3gp', 'mp4', 'webm', 'ogv', 'mov', 'mkv'].includes(ext);
+                if (isMedia && this.fileProcessor.shouldEncryptPath(file.path)) {
+                    await this.resourceProcessor.getDecryptedBlobUrl(file);
+                    // Trigger a light refresh if the view is already trying to load
+                    this.updateRibbon(); // Just to trigger a tick, or better:
+                    // app.workspace.requestSaveLayout() might be too much
+                }
+            }
+        }));
+
         this.setupLeafHooks();
 
         this.registerEvent(
@@ -156,6 +199,34 @@ export default class UwuCryptPlugin extends Plugin {
             })
         );
 
+        this.setupFileExplorerObserver();
+        this.scanVaultForEncryptedFiles();
+
+        this.registerEvent(this.app.vault.on('modify', (file) => {
+            if (file instanceof TFile) this.refreshFileStatus(file);
+        }));
+
+        this.registerEvent(this.app.vault.on('create', (file) => {
+            if (file instanceof TFile) this.refreshFileStatus(file);
+        }));
+
+        this.registerEvent(this.app.vault.on('delete', (file) => {
+            this.encryptedPaths.delete(file.path);
+            this.updateFileExplorerIndicators();
+        }));
+
+        this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+            if (this.encryptedPaths.has(oldPath)) {
+                this.encryptedPaths.delete(oldPath);
+                this.encryptedPaths.add(file.path);
+            }
+            this.updateFileExplorerIndicators();
+        }));
+
+        this.registerEvent(this.app.workspace.on('layout-change', () => {
+            this.updateFileExplorerIndicators();
+        }));
+
         this.registerEvent(
             this.app.workspace.on('file-menu', (menu: Menu, file: TAbstractFile) => {
                 if (file instanceof TFile) {
@@ -166,7 +237,7 @@ export default class UwuCryptPlugin extends Plugin {
                         
                         (async () => {
                             try {
-                                const buffer = await this.app.vault.adapter.readBinary(file.path);
+                                const buffer = await this.originalAdapterReadBinary.call(this.app.vault.adapter, file.path);
                                 const isEnc = this.isEncrypted(buffer);
                                 item.setDisabled(false);
                                 if (isEnc) {
@@ -254,7 +325,7 @@ export default class UwuCryptPlugin extends Plugin {
                 }
             });
             new Notice('(・∀・)ノ Vault Locked');
-            this.imageProcessor.clearCache();
+            this.resourceProcessor.clearCache();
             this.isProcessing = false;
         }));
 
@@ -489,9 +560,18 @@ export default class UwuCryptPlugin extends Plugin {
             }
             return (this.app.vault.adapter as any).copy.call(adapter, path, newPath);
         };
+
+        this.originalAdapterGetResourcePath = adapter.getResourcePath;
+        adapter.getResourcePath = (path: string) => {
+            const tFile = this.app.vault.getAbstractFileByPath(path);
+            if (tFile instanceof TFile && this.vaultManager.unlocked() && this.resourceProcessor.hasCached(tFile.path)) {
+                return this.resourceProcessor.getCachedBlobUrl(tFile.path) || this.originalAdapterGetResourcePath.call(adapter, path);
+            }
+            return this.originalAdapterGetResourcePath.call(adapter, path);
+        };
     }
 
-    private isEncrypted(buffer: ArrayBuffer): boolean {
+    private isEncrypted(buffer: ArrayBufferLike): boolean {
         const sig = this.vaultManager.signature;
         if (!sig || buffer.byteLength < sig.length) return false;
         
@@ -545,48 +625,217 @@ export default class UwuCryptPlugin extends Plugin {
         }
     }
 
-    private setupImageObserver() {
+    private setupResourceObserver() {
+        const selectors = 'img, audio, video, embed, iframe, source';
         const observer = new MutationObserver((mutations) => {
             mutations.forEach((mutation) => {
-                mutation.addedNodes.forEach((node) => {
-                    if (node instanceof HTMLElement) {
-                        const images = node.querySelectorAll('img');
-                        images.forEach(img => this.handleImageElement(img as HTMLImageElement));
-                        
-                        const bgElements = node.querySelectorAll('[style*="background-image"]');
-                        bgElements.forEach(el => this.handleBgImageElement(el as HTMLElement));
+                if (mutation.type === 'childList') {
+                    mutation.addedNodes.forEach((node) => {
+                        if (node instanceof HTMLElement) {
+                            const elements = node.querySelectorAll(selectors);
+                            elements.forEach(el => this.handleResourceElement(el as HTMLElement));
+                            
+                            const bgElements = node.querySelectorAll('[style*="background-image"]');
+                            bgElements.forEach(el => this.handleBgImageElement(el as HTMLElement));
 
-                        if (node instanceof HTMLImageElement) {
-                            this.handleImageElement(node);
+                            if (node.matches(selectors)) {
+                                this.handleResourceElement(node);
+                            }
+                            if (node.style && node.style.backgroundImage) {
+                                this.handleBgImageElement(node);
+                            }
                         }
-                        if (node.style && node.style.backgroundImage) {
-                            this.handleBgImageElement(node);
-                        }
+                    });
+                } else if (mutation.type === 'attributes') {
+                    const target = mutation.target as HTMLElement;
+                    if (target.matches(selectors)) {
+                        this.handleResourceElement(target);
                     }
-                });
+                    if (target.style && target.style.backgroundImage) {
+                        this.handleBgImageElement(target);
+                    }
+                }
             });
         });
 
-        observer.observe(document.body, { childList: true, subtree: true });
+        observer.observe(document.body, { 
+            childList: true, 
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'style', 'data-path']
+        });
         this.register(() => observer.disconnect());
     }
 
-    private async handleImageElement(img: HTMLImageElement) {
-        let src = img.getAttribute('src');
-        if (!src || src.startsWith('blob:') || src.startsWith('data:') || src.startsWith('http')) return;
-
-        const file = this.resolveFileFromSrc(src, img.getAttribute('data-path'));
-        if (file instanceof TFile && this.isImage(file)) {
-            // Check if already in cache (instant) or needs lazy loading
-            if (this.imageProcessor.hasCached(file.path)) {
-                const blobUrl = await this.imageProcessor.getDecryptedBlobUrl(file);
-                if (blobUrl) img.src = blobUrl;
-                return;
+    private async getFileSignature(path: string): Promise<Uint8Array | null> {
+        try {
+            const sigLen = (this.vaultManager.signature as any)?.length || 16;
+            const adapter = this.app.vault.adapter;
+            
+            // Optimization for Desktop: Use node:fs to read only the first few bytes
+            if ((window as any).process && (window as any).process.versions.node) {
+                const fs = (window as any).require('fs');
+                const fullPath = (adapter as any).getFullPath(path);
+                
+                return new Promise((resolve) => {
+                    fs.open(fullPath, 'r', (err: any, fd: number) => {
+                        if (err) return resolve(null);
+                        const buffer = new Uint8Array(sigLen);
+                        fs.read(fd, buffer, 0, sigLen, 0, (err: any) => {
+                            fs.close(fd, () => {});
+                            if (err) resolve(null);
+                            else resolve(buffer);
+                        });
+                    });
+                });
             }
 
-            // Otherwise, observe for lazy decryption
-            img.classList.add('uwu-lazy-image');
-            this.lazyImageObserver.observe(img);
+            // Fallback for Mobile: Read entire file (no range API in Obsidian DataAdapter unfortunately)
+            // But we skip massive files to prevent OOM
+            const stat = await adapter.stat(path);
+            if (stat && stat.size > 10 * 1024 * 1024) { // > 10MB
+                 return null; // Prob not an encrypted file if it's a huge raw binary? 
+                 // Actually, huge encrypted files exist. We'll just have to hope it's rare to scan them all.
+            }
+            
+            const buffer = await this.originalAdapterReadBinary.call(adapter, path);
+            return new Uint8Array(buffer.slice(0, sigLen));
+        } catch (e) {
+            return null;
+        }
+    }
+
+    private async refreshFileStatus(file: TFile) {
+        try {
+            await (this.vaultManager as any).readyPromise;
+            const sig = await this.getFileSignature(file.path);
+            if (sig && this.isEncrypted(sig.buffer)) {
+                this.encryptedPaths.add(file.path);
+            } else {
+                this.encryptedPaths.delete(file.path);
+            }
+            this.updateFileExplorerIndicators();
+        } catch (e) {
+            // File might have been deleted or inaccessible
+        }
+    }
+
+    private async scanVaultForEncryptedFiles() {
+        await (this.vaultManager as any).readyPromise;
+        const files = this.app.vault.getFiles();
+        
+        // Parallel scan with limited concurrency
+        const concurrency = 10; 
+        const queue = [...files];
+        const processNext = async () => {
+            while (queue.length > 0) {
+                const file = queue.shift();
+                if (!file) break;
+                
+                const sig = await this.getFileSignature(file.path);
+                if (sig && this.isEncrypted(sig.buffer)) {
+                    this.encryptedPaths.add(file.path);
+                }
+                
+                // Yield occasionally
+                if (queue.length % 50 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+            }
+        };
+
+        await Promise.all(Array(concurrency).fill(0).map(processNext));
+        this.updateFileExplorerIndicators();
+    }
+
+    private setupFileExplorerObserver() {
+        this.explorerObserver = new MutationObserver((mutations) => {
+            this.updateFileExplorerIndicators();
+        });
+
+        // We need to wait for the file explorer to be ready
+        this.app.workspace.onLayoutReady(() => {
+            const explorerContainer = document.querySelector('.nav-files-container');
+            if (explorerContainer) {
+                this.explorerObserver.observe(explorerContainer, { childList: true, subtree: true });
+            }
+        });
+
+        this.register(() => this.explorerObserver.disconnect());
+    }
+
+    private updateFileExplorerIndicators() {
+        const explorerLeaves = this.app.workspace.getLeavesOfType('file-explorer');
+        const show = this.settings.showIndicators;
+        
+        explorerLeaves.forEach(leaf => {
+            const container = leaf.view.containerEl;
+            
+            // Files
+            const fileEls = container.querySelectorAll('.nav-file');
+            fileEls.forEach(el => {
+                const titleEl = el.querySelector('.nav-file-title') as HTMLElement;
+                const path = titleEl?.getAttribute('data-path');
+                const titleContent = el.querySelector('.nav-file-title-content') || titleEl;
+                
+                if (show && path && this.encryptedPaths.has(path)) {
+                    el.addClass('is-encrypted');
+                    if (!el.querySelector('.uwu-icon-lock')) {
+                        const iconSpan = document.createElement('span');
+                        iconSpan.addClass('uwu-icon-lock');
+                        setIcon(iconSpan, 'lock');
+                        titleContent.prepend(iconSpan);
+                    }
+                } else {
+                    el.removeClass('is-encrypted');
+                    el.querySelector('.uwu-icon-lock')?.remove();
+                }
+            });
+
+            // Folder Roots
+            const folderEls = container.querySelectorAll('.nav-folder');
+            folderEls.forEach(el => {
+                const titleEl = el.querySelector('.nav-folder-title') as HTMLElement;
+                const path = titleEl?.getAttribute('data-path');
+                const titleContent = el.querySelector('.nav-folder-title-content') || titleEl;
+                
+                if (show && path && this.settings.encryptedFolders.includes(path)) {
+                    el.addClass('is-encrypted-root');
+                    if (!el.querySelector('.uwu-icon-lock')) {
+                        const iconSpan = document.createElement('span');
+                        iconSpan.addClass('uwu-icon-lock');
+                        setIcon(iconSpan, 'lock');
+                        titleContent.prepend(iconSpan);
+                    }
+                } else {
+                    el.removeClass('is-encrypted-root');
+                    if (!show || !this.encryptedPaths.has(path || '')) {
+                         el.querySelector('.uwu-icon-lock')?.remove();
+                    }
+                }
+            });
+        });
+    }
+
+    private async handleResourceElement(el: HTMLElement) {
+        let src = el.getAttribute('src');
+        if (!src || src.startsWith('blob:') || src.startsWith('data:') || src.startsWith('http')) return;
+
+        const file = this.resolveFileFromSrc(src, el.getAttribute('data-path'));
+        if (file instanceof TFile) {
+            // Check if binary and should be encrypted
+            const ext = file.extension.toLowerCase();
+            const isBinary = ['pdf', 'mp3', 'wav', 'flac', 'm4a', 'ogg', '3gp', 'mp4', 'webm', 'ogv', 'mov', 'mkv', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif', 'heic', 'heif'].includes(ext);
+            
+            if (isBinary && this.fileProcessor.shouldEncryptPath(file.path)) {
+                if (this.resourceProcessor.hasCached(file.path)) {
+                    const blobUrl = await this.resourceProcessor.getDecryptedBlobUrl(file);
+                    if (blobUrl) (el as any).src = blobUrl;
+                    return;
+                }
+
+                // Use lazy observer to avoid decrypting everything at once
+                el.classList.add('uwu-lazy-resource');
+                this.lazyResourceObserver.observe(el);
+            }
         }
     }
 
@@ -601,45 +850,36 @@ export default class UwuCryptPlugin extends Plugin {
 
         const file = this.resolveFileFromSrc(src, el.getAttribute('data-path'));
         if (file instanceof TFile && this.isImage(file)) {
-             if (this.imageProcessor.hasCached(file.path)) {
-                const blobUrl = await this.imageProcessor.getDecryptedBlobUrl(file);
+             if (this.resourceProcessor.hasCached(file.path)) {
+                const blobUrl = await this.resourceProcessor.getDecryptedBlobUrl(file);
                 if (blobUrl) el.style.backgroundImage = `url("${blobUrl}")`;
                 return;
             }
             
-            this.lazyImageObserver.observe(el);
+            this.lazyResourceObserver.observe(el);
         }
     }
 
-    private setupLazyImageObserver() {
-        this.lazyImageObserver = new IntersectionObserver((entries) => {
+    private setupLazyResourceObserver() {
+        this.lazyResourceObserver = new IntersectionObserver((entries) => {
             entries.forEach(async (entry) => {
                 if (entry.isIntersecting) {
                     const el = entry.target as HTMLElement;
-                    this.lazyImageObserver.unobserve(el);
+                    this.lazyResourceObserver.unobserve(el);
                     
-                    if (el instanceof HTMLImageElement) {
-                        const src = el.getAttribute('src');
-                        if (!src) return;
-                        const file = this.resolveFileFromSrc(src, el.getAttribute('data-path'));
-                        if (file instanceof TFile) {
-                            const blobUrl = await this.imageProcessor.getDecryptedBlobUrl(file);
-                            if (blobUrl) {
-                                el.src = blobUrl;
-                                el.setAttribute('data-uwu-decrypted', 'true');
-                            }
-                        }
-                    } else {
-                        const bg = el.style.backgroundImage;
-                        const match = bg.match(/url\(['"]?(.*?)['"]?\)/);
-                        if (!match) return;
-                        const file = this.resolveFileFromSrc(match[1], el.getAttribute('data-path'));
-                        if (file instanceof TFile) {
-                            const blobUrl = await this.imageProcessor.getDecryptedBlobUrl(file);
-                            if (blobUrl) {
+                    const src = el.getAttribute('src') || (el.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/)?.[1]);
+                    if (!src) return;
+
+                    const file = this.resolveFileFromSrc(src, el.getAttribute('data-path'));
+                    if (file instanceof TFile) {
+                        const blobUrl = await this.resourceProcessor.getDecryptedBlobUrl(file);
+                        if (blobUrl) {
+                            if (el.style.backgroundImage) {
                                 el.style.backgroundImage = `url("${blobUrl}")`;
-                                el.setAttribute('data-uwu-decrypted', 'true');
+                            } else {
+                                (el as any).src = blobUrl;
                             }
+                            el.setAttribute('data-uwu-decrypted', 'true');
                         }
                     }
                 }
@@ -713,8 +953,9 @@ export default class UwuCryptPlugin extends Plugin {
         document.body.removeClass('uwu-is-locked');
         document.body.removeClass('uwu-is-unlocked');
 
-        this.imageProcessor.clearCache();
+        this.resourceProcessor.clearCache();
         const adapter = this.app.vault.adapter;
+        if (this.originalAdapterGetResourcePath) adapter.getResourcePath = this.originalAdapterGetResourcePath;
         if (this.originalAdapterRead) adapter.read = this.originalAdapterRead;
         if (this.originalAdapterReadBinary) adapter.readBinary = this.originalAdapterReadBinary;
         if (this.originalAdapterWrite) adapter.write = this.originalAdapterWrite;
@@ -731,8 +972,8 @@ export default class UwuCryptPlugin extends Plugin {
             WorkspaceLeaf.prototype.setViewState = this.originalSetViewState;
         }
 
-        if (this.lazyImageObserver) {
-            this.lazyImageObserver.disconnect();
+        if (this.lazyResourceObserver) {
+            this.lazyResourceObserver.disconnect();
         }
 
         if (this.vaultManager) {
@@ -802,6 +1043,26 @@ class UwuCryptSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.encryptAll = value;
                     await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Show indicators')
+            .setDesc('Add lock icons to encrypted files and folders in the file explorer.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.showIndicators)
+                .onChange(async (value) => {
+                    this.plugin.settings.showIndicators = value;
+                    await this.plugin.saveSettings();
+                    
+                    if (value) {
+                        (this.plugin as any).setupFileExplorerObserver();
+                        (this.plugin as any).updateFileExplorerIndicators(); // Update folder roots instantly
+                        (this.plugin as any).scanVaultForEncryptedFiles();
+                    } else {
+                        (this.plugin as any).encryptedPaths.clear();
+                        (this.plugin as any).explorerObserver?.disconnect();
+                        (this.plugin as any).updateFileExplorerIndicators();
+                    }
                 }));
 
         new Setting(containerEl)

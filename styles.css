@@ -110,3 +110,22 @@
     margin-bottom: 2rem;
     color: var(--text-muted);
 }
+
+/* File Explorer Indicators */
+.uwu-icon-lock {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 4px;
+    color: var(--text-muted);
+    vertical-align: middle;
+}
+
+.uwu-icon-lock svg {
+    width: 14px;
+    height: 14px;
+}
+
+.nav-folder.is-encrypted-root .uwu-icon-lock {
+    color: var(--color-accent);
+}
