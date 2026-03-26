@@ -30,7 +30,7 @@ export default class UwuCryptPlugin extends Plugin {
     vaultManager!: VaultManager;
     fileProcessor!: FileProcessor;
     resourceProcessor!: ResourceProcessor;
-    isProcessing = false;
+    processingPaths: Set<string> = new Set();
 
     private originalAdapterRead!: any;
     private originalAdapterReadBinary!: any;
@@ -57,8 +57,20 @@ export default class UwuCryptPlugin extends Plugin {
         await this.loadSettings();
 
         this.vaultManager = new VaultManager(this);
+        // Ensure crypto worker is ready before registering hooks
+        await (this.vaultManager as any).readyPromise;
+        
         this.fileProcessor = new FileProcessor(this, this.vaultManager, this.settings);
         this.resourceProcessor = new ResourceProcessor(this, this.vaultManager, this.isEncrypted.bind(this));
+
+        this.ribbonIconEl = this.addRibbonIcon('unlock', 'Unlock Vault', () => {
+            if (this.vaultManager.unlocked()) {
+                this.vaultManager.lockVault();
+            } else {
+                this.vaultManager.requestUnlock();
+            }
+        });
+        this.ribbonIconEl.addClass('uwu-ribbon-icon');
 
         this.registerView(
             UWU_VIEW_TYPE,
@@ -94,7 +106,10 @@ export default class UwuCryptPlugin extends Plugin {
                     const file = this.app.metadataCache.getFirstLinkpathDest(src, ctx.sourcePath);
                     if (file instanceof TFile) {
                         const blobUrl = await this.resourceProcessor.getDecryptedBlobUrl(file);
-                        if (blobUrl) (media as any).src = blobUrl;
+                        if (blobUrl) {
+                            (media as any).src = blobUrl;
+                            if ((media as any).load) setTimeout(() => (media as any).load(), 100);
+                        }
                     }
                 }
             });
@@ -115,14 +130,20 @@ export default class UwuCryptPlugin extends Plugin {
         this.setupResourceObserver();
         this.setupLazyResourceObserver();
 
-        this.ribbonIconEl = this.addRibbonIcon('unlock', 'Unlock Vault', () => {
-            if (this.vaultManager.unlocked()) {
-                this.vaultManager.lockVault();
-            } else {
-                this.vaultManager.requestUnlock();
-            }
+        this.app.workspace.onLayoutReady(() => {
+            this.app.workspace.iterateAllLeaves((leaf) => {
+                const file = (leaf.view as any).file;
+                if (file instanceof TFile && (this.encryptedPaths.has(file.path) || this.fileProcessor.shouldEncryptPath(file.path))) {
+                    if (this.vaultManager.unlocked()) {
+                        // Force a reload once plugin hooks are active
+                        try { (leaf.view as any).onLoadFile?.(file); } catch (e) { leaf.view.load(); }
+                    } else {
+                        UwuView.applyToLeaf(leaf, file);
+                    }
+                }
+            });
+            this.updateRibbon();
         });
-        this.ribbonIconEl.addClass('uwu-ribbon-icon');
 
         // Watch for mobile sidebar/drawer events to re-apply the correct icon/label
         this.registerEvent(this.app.workspace.on('layout-change', () => this.updateRibbon()));
@@ -159,11 +180,34 @@ export default class UwuCryptPlugin extends Plugin {
             if (file instanceof TFile && this.vaultManager.unlocked()) {
                 const ext = file.extension.toLowerCase();
                 const isMedia = ['pdf', 'mp3', 'wav', 'flac', 'm4a', 'ogg', '3gp', 'mp4', 'webm', 'ogv', 'mov', 'mkv'].includes(ext);
-                if (isMedia && this.fileProcessor.shouldEncryptPath(file.path)) {
-                    await this.resourceProcessor.getDecryptedBlobUrl(file);
-                    // Trigger a light refresh if the view is already trying to load
-                    this.updateRibbon(); // Just to trigger a tick, or better:
-                    // app.workspace.requestSaveLayout() might be too much
+                
+                // Case 1: Media file itself
+                if (isMedia && this.encryptedPaths.has(file.path)) {
+                    const blobUrl = await this.resourceProcessor.getDecryptedBlobUrl(file);
+                    if (blobUrl) {
+                        this.app.workspace.iterateAllLeaves(leaf => {
+                            if ((leaf.view as any).file === file) {
+                                try { (leaf.view as any).onLoadFile?.(file); } catch (e) { leaf.view.load(); }
+                            }
+                        });
+                    }
+                }
+
+                // Case 2: Pre-decrypt all media links in MD notes
+                if (ext === 'md') {
+                    const cache = this.app.metadataCache.getFileCache(file);
+                    if (cache?.embeds) {
+                        for (const embed of cache.embeds) {
+                            const target = this.app.metadataCache.getFirstLinkpathDest(embed.link, file.path);
+                            if (target instanceof TFile) {
+                                const targetExt = target.extension.toLowerCase();
+                                const isTargetMedia = ['pdf', 'mp3', 'wav', 'flac', 'm4a', 'ogg', '3gp', 'mp4', 'webm', 'ogv', 'mov', 'mkv'].includes(targetExt);
+                                if (isTargetMedia && this.encryptedPaths.has(target.path)) {
+                                    await this.resourceProcessor.getDecryptedBlobUrl(target);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }));
@@ -286,16 +330,29 @@ export default class UwuCryptPlugin extends Plugin {
 
         // Listen for lock/unlock to refresh views
         this.registerEvent(this.app.workspace.on('uwu-crypt:unlock' as any, () => {
-            this.app.workspace.iterateAllLeaves((leaf) => {
-                if (leaf.view.getViewType() === UWU_VIEW_TYPE) {
-                    const file = (leaf.view as any).file;
-                    if (file instanceof TFile) {
+            this.app.workspace.iterateAllLeaves(async (leaf) => {
+                const file = (leaf.view as any).file;
+                if (file instanceof TFile && (this.encryptedPaths.has(file.path) || leaf.view.getViewType() === UWU_VIEW_TYPE)) {
+                    // Pre-populate resource cache
+                    if (['pdf', 'mp3', 'wav', 'mp4'].includes(file.extension.toLowerCase())) {
+                        await this.resourceProcessor.getDecryptedBlobUrl(file);
+                    }
+
+                    const state = leaf.getViewState();
+                    if (leaf.view.getViewType() === UWU_VIEW_TYPE) {
                         const viewType = (this.app as any).viewRegistry?.getTypeByExtension(file.extension) || 'markdown';
                         leaf.setViewState({
                             type: viewType,
                             state: leaf.view.getState(),
                             popstate: true
                         } as any);
+                    } else {
+                        // VERY forceful refresh: swap to empty then back to native
+                        const active = leaf === this.app.workspace.getMostRecentLeaf();
+                        await leaf.setViewState({ type: 'empty' }, { history: false });
+                        setTimeout(() => {
+                           leaf.setViewState({ ...state, active }, { history: false });
+                        }, 50);
                     }
                 }
             });
@@ -318,15 +375,13 @@ export default class UwuCryptPlugin extends Plugin {
             // 2. Refresh views (Switch ALL relevant leaves to UwuView/Locked state)
             this.app.workspace.iterateAllLeaves((leaf) => {
                 const file = (leaf.view as any).file;
-                if (file instanceof TFile && leaf.view.getViewType() !== UWU_VIEW_TYPE) {
-                    if (this.fileProcessor.shouldEncryptPath(file.path)) {
-                        this.activateUwuView(file);
-                    }
+                if (file instanceof TFile && (this.encryptedPaths.has(file.path) || this.fileProcessor.shouldEncryptPath(file.path))) {
+                    UwuView.applyToLeaf(leaf, file);
                 }
             });
             new Notice('(・∀・)ノ Vault Locked');
             this.resourceProcessor.clearCache();
-            this.isProcessing = false;
+            this.processingPaths.clear();
         }));
 
         // Initial Setup Modal Check (only if no vault exists)
@@ -393,12 +448,32 @@ export default class UwuCryptPlugin extends Plugin {
         
         WorkspaceLeaf.prototype.setViewState = function(viewState: any, result?: any) {
             if (!self.vaultManager.unlocked()) {
-                const file = viewState.state?.file;
-                if (viewState.type !== UWU_VIEW_TYPE && file && self.fileProcessor.shouldEncryptPath(file)) {
-                    viewState.type = UWU_VIEW_TYPE;
+                const filePath = viewState.state?.file || viewState.state?.path;
+                if (filePath && typeof filePath === 'string') {
+                    // Check if the current target is an encrypted file or in an encrypted folder
+                    const isKnownEncrypted = self.encryptedPaths.has(filePath);
+                    const shouldBeEncrypted = self.fileProcessor.shouldEncryptPath(filePath);
+                    
+                    if (viewState.type !== UWU_VIEW_TYPE && (isKnownEncrypted || shouldBeEncrypted)) {
+                        viewState.type = UWU_VIEW_TYPE;
+                        viewState.state = { file: filePath };
+                    }
                 }
             }
             return self.originalSetViewState.call(this, viewState, result);
+        };
+
+        const originalOpenFile = WorkspaceLeaf.prototype.openFile;
+        WorkspaceLeaf.prototype.openFile = async function(file: TFile, state?: any) {
+            if (file instanceof TFile && self.vaultManager.unlocked()) {
+                const ext = file.extension.toLowerCase();
+                const isMedia = ['pdf', 'mp3', 'wav', 'flac', 'm4a', 'ogg', '3gp', 'mp4', 'webm', 'ogv', 'mov', 'mkv'].includes(ext);
+                if (isMedia && self.encryptedPaths.has(file.path)) {
+                    // Pre-decrypt and wait so getResourcePath hook always finds it in cache
+                    await self.resourceProcessor.getDecryptedBlobUrl(file);
+                }
+            }
+            return originalOpenFile.call(this, file, state);
         };
     }
 
@@ -418,7 +493,7 @@ export default class UwuCryptPlugin extends Plugin {
         this.originalAdapterRename = adapter.rename;
 
         const blockIfLocked = async (path: string, action: string) => {
-            if (!this.isProcessing && this.fileProcessor.shouldEncryptPath(path) && !this.vaultManager.unlocked()) {
+            if (!this.processingPaths.has(path) && this.fileProcessor.shouldEncryptPath(path) && !this.vaultManager.unlocked()) {
                 throw new Error(`(⌐■_■) Vault is locked. Unlock to ${action} ${path}`);
             }
         };
@@ -456,25 +531,32 @@ export default class UwuCryptPlugin extends Plugin {
 
         adapter.read = async (path: string): Promise<string> => {
             try {
+                await (this.vaultManager as any).readyPromise;
                 const buffer = await this.originalAdapterReadBinary.call(adapter, path);
-                if (!this.isProcessing && this.isEncrypted(buffer)) {
+                
+                if (!this.processingPaths.has(path) && this.isEncrypted(buffer)) {
                     if (!this.vaultManager.unlocked()) {
                         return "%% (⊙ˍ⊙) File is locked. Please unlock the vault to view this content. %%";
                     }
-                    const { data, mask } = await this.getCachedDecryption(path, buffer);
-                    const unmasked = new Uint8Array(data);
-                    this.maskData(unmasked, mask);
-                    const text = new TextDecoder().decode(unmasked);
-                    unmasked.fill(0);
+                    
+                    const sig = this.vaultManager.signature;
+                    const ciphertext = new Uint8Array(buffer).slice(sig.length);
+                    const plaintext = await this.vaultManager.decrypt(ciphertext);
+                    
+                    const text = new TextDecoder().decode(plaintext);
+                    plaintext.fill(0);
                     return text;
                 }
-            } catch {}
+            } catch (e) {
+                console.error(`(⊙ˍ⊙) Decryption error for ${path}:`, e);
+            }
             return this.originalAdapterRead.call(adapter, path);
         };
 
         adapter.readBinary = async (path: string): Promise<ArrayBuffer> => {
+            await (this.vaultManager as any).readyPromise;
             const buffer = await this.originalAdapterReadBinary.call(adapter, path);
-            if (!this.isProcessing && this.isEncrypted(buffer)) {
+            if (!this.processingPaths.has(path) && this.isEncrypted(buffer)) {
                 if (!this.vaultManager.unlocked()) {
                     return buffer; // Return encrypted data if locked
                 }
@@ -489,7 +571,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         adapter.write = async (path: string, data: string, options?: DataWriteOptions): Promise<void> => {
-            if (!this.isProcessing && this.fileProcessor.shouldEncryptPath(path)) {
+            if (!this.processingPaths.has(path) && this.fileProcessor.shouldEncryptPath(path)) {
                 await blockIfLocked(path, "write to");
                 const buffer = new TextEncoder().encode(data);
                 const encrypted = await this.vaultManager.encrypt(buffer, this.settings.zstdLevel);
@@ -505,7 +587,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         (adapter as any).writeBinary = async (path: string, data: ArrayBuffer, options?: DataWriteOptions): Promise<void> => {
-            if (!this.isProcessing && this.fileProcessor.shouldEncryptPath(path)) {
+            if (!this.processingPaths.has(path) && this.fileProcessor.shouldEncryptPath(path)) {
                 await blockIfLocked(path, "write binary to");
                 const encrypted = await this.vaultManager.encrypt(new Uint8Array(data), this.settings.zstdLevel);
                 
@@ -520,7 +602,8 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         adapter.process = async (path: string, fn: (data: string) => string, options?: DataWriteOptions): Promise<string> => {
-            if (!this.isProcessing && (this.fileProcessor.shouldEncryptPath(path) || this.isEncrypted(await this.originalAdapterReadBinary.call(adapter, path)))) {
+            await (this.vaultManager as any).readyPromise;
+            if (!this.processingPaths.has(path) && (this.fileProcessor.shouldEncryptPath(path) || this.isEncrypted(await this.originalAdapterReadBinary.call(adapter, path)))) {
                  // Vault must be unlocked to process encrypted files
                 await blockIfLocked(path, "process");
                 const content = await adapter.read(path);
@@ -532,7 +615,8 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         (adapter as any).append = async (path: string, data: string, options?: DataWriteOptions): Promise<void> => {
-            if (!this.isProcessing && (this.fileProcessor.shouldEncryptPath(path) || this.isEncrypted(await this.originalAdapterReadBinary.call(adapter, path)))) {
+            await (this.vaultManager as any).readyPromise;
+            if (!this.processingPaths.has(path) && (this.fileProcessor.shouldEncryptPath(path) || this.isEncrypted(await this.originalAdapterReadBinary.call(adapter, path)))) {
                 await blockIfLocked(path, "append to");
                 const content = await adapter.read(path);
                 return adapter.write(path, content + data, options);
@@ -541,7 +625,8 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         (adapter as any).appendBinary = async (path: string, data: ArrayBuffer, options?: DataWriteOptions): Promise<void> => {
-            if (!this.isProcessing && (this.fileProcessor.shouldEncryptPath(path) || this.isEncrypted(await this.originalAdapterReadBinary.call(adapter, path)))) {
+            await (this.vaultManager as any).readyPromise;
+            if (!this.processingPaths.has(path) && (this.fileProcessor.shouldEncryptPath(path) || this.isEncrypted(await this.originalAdapterReadBinary.call(adapter, path)))) {
                 await blockIfLocked(path, "append binary to");
                 const content = await adapter.readBinary(path);
                 const combined = new Uint8Array(content.byteLength + data.byteLength);
@@ -553,7 +638,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         (adapter as any).copy = async (path: string, newPath: string): Promise<void> => {
-            if (!this.isProcessing && (this.fileProcessor.shouldEncryptPath(newPath) || this.fileProcessor.shouldEncryptPath(path))) {
+            if (!this.processingPaths.has(path) && (this.fileProcessor.shouldEncryptPath(newPath) || this.fileProcessor.shouldEncryptPath(path))) {
                 await blockIfLocked(newPath, "copy to");
                 const data = await adapter.readBinary(path);
                 return adapter.writeBinary(newPath, data);
@@ -572,10 +657,15 @@ export default class UwuCryptPlugin extends Plugin {
     }
 
     private isEncrypted(buffer: ArrayBufferLike): boolean {
+        const data = new Uint8Array(buffer);
+        // Direct literal check for "UWU" + Version 1 sequence as emergency fallback
+        if (data.length >= 4 && data[0] === 0x55 && data[1] === 0x57 && data[2] === 0x55 && data[3] === 0x01) {
+            return true;
+        }
+
         const sig = this.vaultManager.signature;
         if (!sig || buffer.byteLength < sig.length) return false;
         
-        const data = new Uint8Array(buffer);
         for (let i = 0; i < sig.length; i++) {
             if (data[i] !== sig[i]) return false;
         }
@@ -708,12 +798,47 @@ export default class UwuCryptPlugin extends Plugin {
     private async refreshFileStatus(file: TFile) {
         try {
             await (this.vaultManager as any).readyPromise;
+            const wasEncrypted = this.encryptedPaths.has(file.path);
             const sig = await this.getFileSignature(file.path);
-            if (sig && this.isEncrypted(sig.buffer)) {
-                this.encryptedPaths.add(file.path);
-            } else {
-                this.encryptedPaths.delete(file.path);
+            const isEncrypted = sig ? this.isEncrypted(sig.buffer) : false;
+            
+            if (isEncrypted) this.encryptedPaths.add(file.path);
+            else this.encryptedPaths.delete(file.path);
+
+            // Always revoke old URL if file was modified
+            this.resourceProcessor.revokeUrl(file.path);
+
+            const ext = file.extension.toLowerCase();
+            const isMedia = ['pdf', 'mp3', 'wav', 'flac', 'm4a', 'ogg', '3gp', 'mp4', 'webm', 'ogv', 'mov', 'mkv'].includes(ext);
+
+            // If encryption status changed OR it's a media file (we revoked its URL above), refresh views
+            if (wasEncrypted !== isEncrypted || isMedia) {
+                this.app.workspace.iterateAllLeaves(async (leaf) => {
+                    if ((leaf.view as any).file === file) {
+                        if (isEncrypted && !this.vaultManager.unlocked()) {
+                            UwuView.applyToLeaf(leaf, file);
+                        } else {
+                            // Pre-decrypt for media files so getResourcePath hook finds it
+                            if (isMedia && this.vaultManager.unlocked()) {
+                                await this.resourceProcessor.getDecryptedBlobUrl(file);
+                            }
+
+                            // Forceful refresh for PDFs and other complex views
+                            if (ext === 'pdf' || leaf.view.getViewType() !== 'markdown') {
+                                const state = leaf.getViewState();
+                                const active = leaf === this.app.workspace.getMostRecentLeaf();
+                                await leaf.setViewState({ type: 'empty' }, { history: false });
+                                setTimeout(() => {
+                                    leaf.setViewState({ ...state, active }, { history: false });
+                                }, 100);
+                            } else {
+                                try { (leaf.view as any).onLoadFile?.(file); } catch (e) { leaf.view.load(); }
+                            }
+                        }
+                    }
+                });
             }
+            
             this.updateFileExplorerIndicators();
         } catch (e) {
             // File might have been deleted or inaccessible
@@ -816,6 +941,7 @@ export default class UwuCryptPlugin extends Plugin {
     }
 
     private async handleResourceElement(el: HTMLElement) {
+        await (this.vaultManager as any).readyPromise;
         let src = el.getAttribute('src');
         if (!src || src.startsWith('blob:') || src.startsWith('data:') || src.startsWith('http')) return;
 
@@ -828,7 +954,10 @@ export default class UwuCryptPlugin extends Plugin {
             if (isBinary && this.fileProcessor.shouldEncryptPath(file.path)) {
                 if (this.resourceProcessor.hasCached(file.path)) {
                     const blobUrl = await this.resourceProcessor.getDecryptedBlobUrl(file);
-                    if (blobUrl) (el as any).src = blobUrl;
+                    if (blobUrl) {
+                        (el as any).src = blobUrl;
+                        if ((el as any).load) (el as any).load();
+                    }
                     return;
                 }
 
@@ -893,26 +1022,31 @@ export default class UwuCryptPlugin extends Plugin {
             if (file instanceof TFile) return file;
         }
 
-        const cleanSrc = decodeURIComponent(src.split('?')[0]);
+        // Clean query params
+        const rawSrc = src.split('?')[0];
         
-        // Strategy 1: app:// or capacitor:// prefix stripping
-        if (cleanSrc.startsWith('app://') || cleanSrc.startsWith('capacitor://')) {
+        // Strategy 1: app:// or capacitor:// extraction
+        if (rawSrc.startsWith('app://') || rawSrc.startsWith('capacitor://')) {
             const vaultRootResource = this.app.vault.adapter.getResourcePath('');
-            const prefix = vaultRootResource.split('?')[0];
-            if (cleanSrc.toLowerCase().startsWith(prefix.toLowerCase())) {
-                const vaultPath = cleanSrc.substring(prefix.length);
-                const file = this.app.vault.getAbstractFileByPath(vaultPath);
-                if (file instanceof TFile) return file;
-            }
+            const rawPrefix = vaultRootResource.split('?')[0];
             
-            // Fallback: search for the filename in the whole vault if it's app:// but prefix didn't match
-            const fileName = cleanSrc.split('/').pop() || '';
-            const file = this.app.metadataCache.getFirstLinkpathDest(fileName, '');
-            if (file instanceof TFile) return file;
+            // Try matching encoded prefix AND decoded prefix
+            const possiblePrefixes = [rawPrefix, decodeURIComponent(rawPrefix)];
+            
+            for (const prefix of possiblePrefixes) {
+                if (rawSrc.toLowerCase().startsWith(prefix.toLowerCase())) {
+                    const encodedVaultPath = rawSrc.substring(prefix.length);
+                    const vaultPath = decodeURIComponent(encodedVaultPath);
+                    const file = this.app.vault.getAbstractFileByPath(vaultPath);
+                    if (file instanceof TFile) return file;
+                }
+            }
         }
 
+        const decodedSrc = decodeURIComponent(rawSrc);
+
         // Strategy 2: Absolute/Relative Metadata Lookup
-        const searchPath = cleanSrc.replace(/^(app|capacitor):\/\/localhost\//, '');
+        const searchPath = decodedSrc.replace(/^(app|capacitor):\/\/localhost\//, '');
         let file = this.app.metadataCache.getFirstLinkpathDest(searchPath, dataPath || '');
         if (file instanceof TFile) return file;
 
@@ -924,28 +1058,18 @@ export default class UwuCryptPlugin extends Plugin {
         return null;
     }
 
-    private activateUwuView(file: TFile) {
-        this.app.workspace.iterateAllLeaves((leaf) => {
-            if (leaf.view.getViewType() !== UWU_VIEW_TYPE && (leaf.view as any).file === file) {
-                leaf.setViewState({
-                    type: UWU_VIEW_TYPE,
-                    state: { file: file.path },
-                });
-            }
-        });
+    private async isEncryptedFileAsync(file: TFile): Promise<boolean> {
+        if (this.encryptedPaths.has(file.path)) return true;
+        const sig = await this.getFileSignature(file.path);
+        return sig ? this.isEncrypted(sig.buffer) : false;
     }
 
     private isImage(file: TFile): boolean {
         const ext = file.extension.toLowerCase();
-        // 1. Try Obsidian's official view registry
         const type = (this.app as any).viewRegistry?.getTypeByExtension(ext);
         if (type === 'image') return true;
-
-        // 2. Comprehensive fallback list for standard image formats
-        const imageExtensions = [
-            'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'tiff', 'tif',
-            'ico', 'jfif', 'pjpeg', 'pjp', 'avif', 'heic', 'heif', 'jxl'
-        ];
+        
+        const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'tiff', 'tif', 'ico', 'jfif', 'pjpeg', 'pjp', 'avif', 'heic', 'heif', 'jxl'];
         return imageExtensions.includes(ext);
     }
 

@@ -27,7 +27,7 @@ export class ResourceProcessor {
         await (this.vaultManager as any).readyPromise;
 
         try {
-            this.plugin.isProcessing = true;
+            this.plugin.processingPaths.add(file.path);
             const buffer = await this.app.vault.adapter.readBinary(file.path);
             if (this.isEncrypted(buffer)) {
                 const sig = this.vaultManager.signature;
@@ -44,7 +44,7 @@ export class ResourceProcessor {
                 return url;
             }
         } finally {
-            this.plugin.isProcessing = false;
+            this.plugin.processingPaths.delete(file.path);
         }
 
         return null;

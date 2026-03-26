@@ -215,4 +215,13 @@ export class VaultManager {
     unlocked() {
         return !this.isLocked;
     }
+
+    public isEncrypted(buffer: ArrayBufferLike): boolean {
+        if (!this.signature || buffer.byteLength < this.signature.length) return false;
+        const data = new Uint8Array(buffer);
+        for (let i = 0; i < this.signature.length; i++) {
+            if (data[i] !== this.signature[i]) return false;
+        }
+        return true;
+    }
 }

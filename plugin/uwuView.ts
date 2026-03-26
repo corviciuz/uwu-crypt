@@ -66,17 +66,25 @@ export class UwuView extends FileView {
         }
     }
 
+    static async applyToLeaf(leaf: WorkspaceLeaf, file: TFile) {
+        const leafView = leaf.view as any;
+        // Check if this leaf is already viewing this file in some form
+        if (leafView.file === file || leaf.getViewState()?.state?.file === file.path || leaf.getViewState()?.state?.path === file.path) {
+            if (leaf.view.getViewType() !== UWU_VIEW_TYPE) {
+                await leaf.setViewState({
+                    type: UWU_VIEW_TYPE,
+                    state: { file: file.path },
+                }, { history: false });
+            }
+        }
+    }
+
     private async isEncryptedFile(file: TFile): Promise<boolean> {
         try {
-            const buffer = await this.app.vault.readBinary(file);
-            const sig = this.vaultManager.signature;
-            if (!sig || buffer.byteLength < sig.length) return false;
-
-            const data = new Uint8Array(buffer);
-            for (let i = 0; i < sig.length; i++) {
-                if (data[i] !== sig[i]) return false;
-            }
-            return true;
+            await (this.vaultManager as any).readyPromise;
+            // Use original adapter to be sure we read raw data
+            const buffer = await this.app.vault.adapter.readBinary(file.path);
+            return this.vaultManager.isEncrypted(buffer);
         } catch {
             return false;
         }
