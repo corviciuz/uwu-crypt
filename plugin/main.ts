@@ -1,4 +1,4 @@
-import { Plugin, PluginSettingTab, App, Setting, TFile, TFolder, Menu, Notice, WorkspaceLeaf, TAbstractFile, DataWriteOptions, setIcon } from 'obsidian';
+import { Plugin, PluginSettingTab, App, Setting, TFile, TFolder, Menu, Notice, WorkspaceLeaf, TAbstractFile, DataWriteOptions, setIcon, debounce } from 'obsidian';
 import { VaultManager } from './vaultManager.ts';
 import { FileProcessor } from './fileProcessor.ts';
 import { UwuView, UWU_VIEW_TYPE } from './uwuView.ts';
@@ -44,6 +44,7 @@ export default class UwuCryptPlugin extends Plugin {
     private ribbonIconEl!: HTMLElement;
     private lazyImageObserver!: IntersectionObserver;
     private originalSetViewState!: any;
+    private isUpdatingRibbon = false;
 
     private decryptionCache = new Map<string, Promise<{ data: Uint8Array, mask: Uint8Array }>>();
 
@@ -67,7 +68,7 @@ export default class UwuCryptPlugin extends Plugin {
             const images = el.querySelectorAll('img');
             images.forEach(async (img) => {
                 const src = img.getAttribute('src');
-                if (src && (src.startsWith('app://') || !src.includes('://'))) {
+                if (src && (src.startsWith('app://') || src.startsWith('capacitor://') || !src.includes('://'))) {
                     const path = ctx.sourcePath;
                     // Try to find the file in the vault
                     const file = this.app.metadataCache.getFirstLinkpathDest(src, path);
@@ -91,16 +92,36 @@ export default class UwuCryptPlugin extends Plugin {
                 this.vaultManager.requestUnlock();
             }
         });
+        this.ribbonIconEl.addClass('uwu-ribbon-icon');
+
+        // Watch for mobile sidebar/drawer events to re-apply the correct icon/label
+        this.registerEvent(this.app.workspace.on('layout-change', () => this.updateRibbon()));
+        
+        const debouncedUpdate = debounce(() => this.updateRibbon(), 200, true);
+        const observer = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                if (mutation.addedNodes.length > 0) {
+                    debouncedUpdate();
+                    break;
+                }
+            }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        this.register(() => observer.disconnect());
 
         this.registerEvent(this.app.workspace.on('uwu-crypt:lock' as any, () => this.updateRibbon()));
         this.registerEvent(this.app.workspace.on('uwu-crypt:unlock' as any, () => this.updateRibbon()));
         this.updateRibbon();
 
         this.addCommand({
-            id: 'unlock-vault',
+            id: 'lock-unlock-vault',
             name: 'Unlock Vault',
             callback: () => {
-                this.vaultManager.requestUnlock();
+                if (this.vaultManager.unlocked()) {
+                    this.vaultManager.lockVault();
+                } else {
+                    this.vaultManager.requestUnlock();
+                }
             }
         });
 
@@ -139,22 +160,37 @@ export default class UwuCryptPlugin extends Plugin {
             this.app.workspace.on('file-menu', (menu: Menu, file: TAbstractFile) => {
                 if (file instanceof TFile) {
                     menu.addItem((item) => {
-                        item.setTitle('Encrypt File')
-                            .setIcon('lock')
-                            .onClick(async () => {
-                                await this.fileProcessor.processFile(file, true);
-                                new Notice(`(⌐■_■) Encrypted file ${file.name}`);
-                            });
-                    });
-                    menu.addItem((item) => {
-                        item.setTitle('Decrypt File')
-                            .setIcon('unlock')
-                            .onClick(async () => {
-                                await this.fileProcessor.processFile(file, false);
-                                new Notice(`( •_•)>⌐■-■ Decrypted file ${file.name}`);
-                            });
+                        item.setTitle('Checking encryption state...')
+                            .setIcon('loader')
+                            .setDisabled(true);
+                        
+                        (async () => {
+                            try {
+                                const buffer = await this.app.vault.adapter.readBinary(file.path);
+                                const isEnc = this.isEncrypted(buffer);
+                                item.setDisabled(false);
+                                if (isEnc) {
+                                    item.setTitle('Decrypt File')
+                                        .setIcon('unlock')
+                                        .onClick(async () => {
+                                            await this.fileProcessor.processFile(file, false);
+                                            new Notice(`( •_•)>⌐■-■ Decrypted file ${file.name}`);
+                                        });
+                                } else {
+                                    item.setTitle('Encrypt File')
+                                        .setIcon('lock')
+                                        .onClick(async () => {
+                                            await this.fileProcessor.processFile(file, true);
+                                            new Notice(`(⌐■_■) Encrypted file ${file.name}`);
+                                        });
+                                }
+                            } catch (e) {
+                                item.setTitle('UWU Crypt Error').setDisabled(true);
+                            }
+                        })();
                     });
                 } else if (file instanceof TFolder) {
+                    // ... folder items stay same ...
                     menu.addItem((item) => {
                         item.setTitle('Encrypt Folder Recursively')
                             .setIcon('lock')
@@ -232,10 +268,52 @@ export default class UwuCryptPlugin extends Plugin {
     }
 
     private updateRibbon() {
-        if (!this.ribbonIconEl) return;
+        if (this.isUpdatingRibbon) return;
+        this.isUpdatingRibbon = true;
+
         const unlocked = this.vaultManager.unlocked();
-        setIcon(this.ribbonIconEl, unlocked ? 'lock' : 'unlock');
-        this.ribbonIconEl.setAttribute('aria-label', unlocked ? 'Lock Vault' : 'Unlock Vault');
+        const icon = unlocked ? 'lock' : 'unlock';
+        const label = unlocked ? 'Lock Vault' : 'Unlock Vault';
+
+        // Find all possible instances of the ribbon button (including mobile sidebar clones)
+        const selectors = [
+            '.uwu-ribbon-icon',
+            '.side-dock-ribbon-action[aria-label*="Vault"]',
+            '.side-dock-ribbon-action[data-tooltip*="Vault"]'
+        ];
+
+        selectors.forEach(selector => {
+            document.querySelectorAll(selector).forEach((node: Element) => {
+                const el = node as HTMLElement;
+                // Double check it's likely our icon by class or by label pattern
+                if (el.hasClass('uwu-ribbon-icon') || 
+                    el.getAttribute('aria-label')?.includes('Vault') || 
+                    el.getAttribute('data-tooltip')?.includes('Vault')) {
+                    
+                    const iconContainer = el.querySelector('.side-dock-ribbon-action-icon') || el;
+                    setIcon(iconContainer as HTMLElement, icon);
+                    el.setAttr('aria-label', label);
+                    el.setAttr('title', label);
+                    el.addClass('uwu-ribbon-icon'); // Mark clones for future updates
+
+                    const textEl = el.querySelector('.side-dock-ribbon-action-text');
+                    if (textEl) textEl.textContent = label;
+                }
+            });
+        });
+
+        this.updateCommandName();
+        this.isUpdatingRibbon = false;
+    }
+
+    private updateCommandName() {
+        const unlocked = this.vaultManager.unlocked();
+        const commandId = `${this.manifest.id}:lock-unlock-vault`;
+        // @ts-ignore
+        const command = this.app.commands.commands[commandId];
+        if (command) {
+            command.name = unlocked ? 'Lock Vault' : 'Unlock Vault';
+        }
     }
 
     private setupLeafHooks() {
@@ -549,11 +627,6 @@ export default class UwuCryptPlugin extends Plugin {
                             if (blobUrl) {
                                 el.src = blobUrl;
                                 el.setAttribute('data-uwu-decrypted', 'true');
-                                el.style.opacity = '0';
-                                requestAnimationFrame(() => {
-                                    el.style.transition = 'opacity 0.3s ease-in-out';
-                                    el.style.opacity = '1';
-                                });
                             }
                         }
                     } else {
@@ -582,8 +655,8 @@ export default class UwuCryptPlugin extends Plugin {
 
         const cleanSrc = decodeURIComponent(src.split('?')[0]);
         
-        // Strategy 1: app:// prefix stripping
-        if (cleanSrc.startsWith('app://')) {
+        // Strategy 1: app:// or capacitor:// prefix stripping
+        if (cleanSrc.startsWith('app://') || cleanSrc.startsWith('capacitor://')) {
             const vaultRootResource = this.app.vault.adapter.getResourcePath('');
             const prefix = vaultRootResource.split('?')[0];
             if (cleanSrc.toLowerCase().startsWith(prefix.toLowerCase())) {
@@ -598,14 +671,15 @@ export default class UwuCryptPlugin extends Plugin {
             if (file instanceof TFile) return file;
         }
 
-        // Strategy 2: Direct resolution (for relative paths)
-        const file = this.app.metadataCache.getFirstLinkpathDest(cleanSrc, '');
+        // Strategy 2: Absolute/Relative Metadata Lookup
+        const searchPath = cleanSrc.replace(/^(app|capacitor):\/\/localhost\//, '');
+        let file = this.app.metadataCache.getFirstLinkpathDest(searchPath, dataPath || '');
         if (file instanceof TFile) return file;
 
-        // Final fallback: try to find by name from any path
-        const fileName = cleanSrc.split('/').pop() || '';
-        const fallbackFile = this.app.metadataCache.getFirstLinkpathDest(fileName, '');
-        if (fallbackFile instanceof TFile) return fallbackFile;
+        // Strategy 3: Filename-only fallback
+        const fileName = searchPath.split('/').pop() || '';
+        file = this.app.metadataCache.getFirstLinkpathDest(fileName, dataPath || '');
+        if (file instanceof TFile) return file;
 
         return null;
     }
@@ -636,6 +710,9 @@ export default class UwuCryptPlugin extends Plugin {
     }
 
     async onunload() {
+        document.body.removeClass('uwu-is-locked');
+        document.body.removeClass('uwu-is-unlocked');
+
         this.imageProcessor.clearCache();
         const adapter = this.app.vault.adapter;
         if (this.originalAdapterRead) adapter.read = this.originalAdapterRead;

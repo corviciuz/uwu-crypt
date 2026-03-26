@@ -19,6 +19,9 @@ export class ImageProcessor {
             return this.blobCache.get(file.path)!;
         }
 
+        if (!this.vaultManager.unlocked()) return null;
+        await (this.vaultManager as any).readyPromise;
+
         try {
             this.plugin.isProcessing = true;
             const buffer = await this.app.vault.adapter.readBinary(file.path);

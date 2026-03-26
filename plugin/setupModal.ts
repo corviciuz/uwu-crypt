@@ -41,14 +41,20 @@ export class SetupModal extends Modal {
             const row = new Setting(contentEl)
                 .setName(name)
                 .setDesc(desc)
-                .addText((text) =>
+                .addText((text) => {
                     text.setPlaceholder(placeholder)
                         .onChange((v) => {
                             onChange(v);
                             this.updateEstimation();
-                        })
-                        .inputEl.type = "password"
-                );
+                        });
+                    text.inputEl.type = "password";
+                    text.inputEl.addEventListener("keydown", (e) => {
+                        if (e.key === "Enter") {
+                            // Find and click the submission button
+                            this.contentEl.querySelector(".mod-cta")?.dispatchEvent(new MouseEvent("click"));
+                        }
+                    });
+                });
             this.inputRows.push(row.settingEl);
             return row;
         };

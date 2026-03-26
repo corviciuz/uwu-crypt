@@ -98,7 +98,7 @@ export class UwuView extends FileView {
             
             const btn = inner.createEl("button", { text: "Unlock Vault", cls: "uwu-unlock-button" });
             btn.addEventListener("click", () => {
-                 (this.app as any).commands.executeCommandById("uwu-crypt:unlock-vault");
+                 this.vaultManager.requestUnlock();
             });
         } else {
             this.lockedEl.style.display = 'flex';
