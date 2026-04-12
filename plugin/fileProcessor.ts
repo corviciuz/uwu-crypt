@@ -2,6 +2,7 @@ import { App, TFile, TFolder, TAbstractFile, Notice, normalizePath } from 'obsid
 import { VaultManager } from './vaultManager.ts';
 
 export class FileProcessor {
+    private activeOperations = new Map<string, Promise<void>>();
     private queue: (() => Promise<void>)[] = [];
     private activeCount = 0;
     private maxConcurrency = 2;
@@ -10,6 +11,15 @@ export class FileProcessor {
 
     private get app(): App {
         return this.plugin.app;
+    }
+
+    /**
+     * Проверка: обрабатывается ли файл прямо сейчас.
+     * Используется в main.ts для предотвращения перехвата хуками adapter
+     * во время шифрования/дешифрования.
+     */
+    isProcessing(path: string): boolean {
+        return this.activeOperations.has(path);
     }
 
     private async runQueue() {
@@ -35,34 +45,41 @@ export class FileProcessor {
     async processFile(file: TFile, encrypt: boolean): Promise<void> {
         return new Promise((resolve, reject) => {
             this.enqueue(async () => {
+                // Регистрируем активную операцию для isProcessing()
+                let opResolve: () => void;
+                const opPromise = new Promise<void>(r => { opResolve = r; });
+                this.activeOperations.set(file.path, opPromise);
+                let result: Uint8Array | null = null;
                 try {
-                    this.plugin.processingPaths.add(file.path);
                     const data = await this.app.vault.readBinary(file);
-                    let result: Uint8Array;
-                    
+                    let plaintext: Uint8Array | null = null;
+
                     if (encrypt) {
-                        const encrypted = await this.vaultManager.encrypt(new Uint8Array(data), this.settings.zstdLevel);
+                        plaintext = new Uint8Array(data);
+                        const encrypted = await this.vaultManager.encrypt(plaintext, this.settings.zstdLevel);
+                        try { if (plaintext.buffer.byteLength > 0) plaintext.fill(0); } catch {}
                         const sig = this.vaultManager.signature;
                         result = new Uint8Array(sig.length + encrypted.length);
                         result.set(sig);
                         result.set(encrypted, sig.length);
                     } else {
                         const sig = this.vaultManager.signature;
-                        const ciphertext = new Uint8Array(data).slice(sig.length);
-                        result = await this.vaultManager.decrypt(ciphertext);
+                        plaintext = new Uint8Array(data).slice(sig.length);
+                        result = await this.vaultManager.decrypt(plaintext);
+                        try { if (plaintext.buffer.byteLength > 0) plaintext.fill(0); } catch {}
                     }
 
                     await this.app.vault.modifyBinary(file, result.buffer as ArrayBuffer);
-                    
-                    this.plugin.processingPaths.delete(file.path);
-
-                    // The modify event handler in main.ts will handle the forceful refresh
                     resolve();
                 } catch (err: any) {
                     new Notice(`Failed to ${encrypt ? 'encrypt' : 'decrypt'} ${file.path}: ${err.message}`);
                     reject(err);
                 } finally {
-                    this.plugin.processingPaths.delete(file.path);
+                    if (result) {
+                        try { if (result.buffer.byteLength > 0) result.fill(0); } catch {}
+                    }
+                    this.activeOperations.delete(file.path);
+                    opResolve!();
                 }
             });
         });

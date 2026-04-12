@@ -4,10 +4,14 @@ import { SetupModal } from './setupModal.ts';
 export class VaultManager {
     private worker!: Worker;
     private messageId = 0;
-    private pendingMessages = new Map<number, { resolve: Function, reject: Function }>();
+    private pendingMessages = new Map<number, { resolve: Function, reject: Function, onProgress?: (p: number) => void }>();
     private isLocked = true;
     private sessionTimeoutTimer: number | null = null;
     public signature!: Uint8Array;
+    private failedAttempts = 0;
+    private readonly backoffDelays = [0, 0, 5000, 10000, 30000, 60000, 180000, 300000]; // ms: 0, 0, 5с, 10с, 30с, 60с, 3м, 5м
+    private lockoutUntil: number = 0; // timestamp когда разблокируется ввод
+    private lockoutCallback: (() => void) | null = null;
     private readyPromise: Promise<void>;
     private resolveReady!: () => void;
     private rejectReady!: (err: Error) => void;
@@ -32,13 +36,18 @@ export class VaultManager {
             ]);
 
             const blob = new Blob([workerContent], { type: 'application/javascript' });
-            const blobUrl = URL.createObjectURL(blob);
+            this.workerBlobUrl = URL.createObjectURL(blob);
 
-            this.worker = new Worker(blobUrl);
+            this.worker = new Worker(this.workerBlobUrl);
             this.worker.onmessage = (e) => {
                 const { id, type, payload } = e.data;
                 const pending = this.pendingMessages.get(id);
-                
+
+                if (type === 'PROGRESS') {
+                    if (pending?.onProgress) pending.onProgress(payload.progress);
+                    return;
+                }
+
                 if (type === 'READY') {
                     this.signature = payload.signature;
                     this.resolveReady();
@@ -58,6 +67,13 @@ export class VaultManager {
                 }
                 this.pendingMessages.delete(id);
             };
+            this.worker.onerror = (e) => {
+                console.error('UWU-Crypt: Worker crashed', e);
+                for (const [, pending] of this.pendingMessages) {
+                    pending.reject(new Error('Crypto worker crashed'));
+                }
+                this.pendingMessages.clear();
+            };
             this.sendMessage('INIT', { wasmBuffer: wasmContent });
         } catch (err: any) {
             this.rejectReady(err);
@@ -66,38 +82,142 @@ export class VaultManager {
         }
     }
 
-    private async sendMessage(type: string, payload?: any): Promise<any> {
+    private async sendMessage(type: string, payload?: any, onProgress?: (p: number) => void): Promise<any> {
         if (type !== 'INIT') await this.readyPromise;
-        
+
         return new Promise((resolve, reject) => {
             const id = this.messageId++;
-            this.pendingMessages.set(id, { resolve, reject });
-            this.worker.postMessage({ id, type, payload });
+            this.pendingMessages.set(id, { resolve, reject, onProgress });
+            
+            // Use Transfer Lists for memory safety and performance
+            const transfers: Transferable[] = [];
+            if (payload) {
+                if (payload.password instanceof Uint8Array) transfers.push(payload.password.buffer);
+                if (payload.data instanceof Uint8Array) transfers.push(payload.data.buffer);
+                if (payload.wasmBuffer instanceof ArrayBuffer) transfers.push(payload.wasmBuffer);
+                // Removed payload.payload transfer to avoid detaching manifests/small metadata needed after worker calls
+            }
+
+            this.worker.postMessage({ id, type, payload }, transfers);
         });
     }
 
-    async createVault(password: string, m: number, t: number): Promise<Uint8Array> {
+    async createVault(password: Uint8Array, m: number, t: number, onProgress?: (p: number) => void): Promise<Uint8Array> {
         await this.readyPromise;
-        const { manifest } = await this.sendMessage('CREATE', { password, m, t });
+        const { manifest } = await this.sendMessage('CREATE', { password, m, t }, onProgress);
+        try { if (password.buffer.byteLength > 0) password.fill(0); } catch {}
+        
         await this.saveManifest(manifest);
+        
+        // Finalize backup in settings
+        (this.plugin as any).settings.manifestBackup = this.uint8ToBase64(manifest);
+        await (this.plugin as any).saveSettings();
+
         this.isLocked = false;
         this.plugin.app.workspace.trigger('uwu-crypt:unlock');
         this.startSessionTimer();
         return manifest;
     }
 
-    async unlockVault(password: string): Promise<void> {
+    async unlockVault(password: Uint8Array, onProgress?: (p: number) => void, manifestOverride?: Uint8Array): Promise<void> {
         await this.readyPromise;
-        const manifest = await this.getManifest();
+
+        const remaining = this.getLockoutRemaining();
+        if (remaining > 0) {
+            throw new Error(`LOCKED: ${remaining}`);
+        }
+
+        let manifest = manifestOverride || await this.getManifest();
         if (!manifest) throw new Error('No vault configuration found');
-        await this.sendMessage('UNLOCK', { password, payload: manifest });
-        this.isLocked = false;
-        this.plugin.app.workspace.trigger('uwu-crypt:unlock');
-        this.startSessionTimer();
+
+        try {
+            await this.sendMessage('UNLOCK', { password, payload: manifest }, onProgress);
+            this.failedAttempts = 0;
+            // If we got here, the manifest is cryptographically verified (Argon2 check inside WASM passed)
+            // --- HMAC OK! START SYNC / RESTORATION ---
+            const m_b64 = this.uint8ToBase64(manifest);
+            const settings = (this.plugin as any).settings;
+
+            // 1. Sync Backup if missing or broken or different
+            let backupValid = false;
+            try {
+                const b_raw = this.base64ToUint8(settings.manifestBackup || "");
+                if (this.isManifestHealthy(b_raw) && this.arraysEqual(manifest, b_raw)) backupValid = true;
+            } catch {}
+
+            if (!backupValid || manifestOverride) {
+                settings.manifestBackup = m_b64;
+                await (this.plugin as any).saveSettings();
+                console.log('UWU-Crypt: Settings backup synchronized' + (manifestOverride ? ' (BYOM)' : ''));
+            }
+
+            // 2. Sync Physical File if missing, broken, different, or forced via manifestOverride
+            const adapter = this.plugin.app.vault.adapter;
+            const vaultFile = '.uwu/vault.uwu';
+            let fileValid = false;
+            if (manifestOverride === undefined) { // If it's NOT an import/BYM, check current file
+                try {
+                    if (await adapter.exists(vaultFile)) {
+                        const content = await adapter.read(vaultFile);
+                        const v_raw = this.base64ToUint8(content.trim());
+                        if (this.isManifestHealthy(v_raw) && this.arraysEqual(manifest, v_raw)) fileValid = true;
+                    }
+                } catch {}
+            }
+
+            if (!fileValid) {
+                await this.saveManifest(manifest);
+                if (manifestOverride) {
+                    new Notice('(⌐■_■) Vault initialized with your manifest');
+                } else {
+                    console.log('UWU-Crypt: Physical manifest restored/updated after HMAC check');
+                }
+            }
+
+            this.isLocked = false;
+            this.plugin.app.workspace.trigger('uwu-crypt:unlock');
+            this.startSessionTimer();
+        } catch (e) {
+            this.failedAttempts++;
+            if (this.failedAttempts >= 3) {
+                const delayIndex = Math.min(this.failedAttempts - 1, this.backoffDelays.length - 1);
+                const delayMs = this.backoffDelays[delayIndex];
+                this.lockoutUntil = Date.now() + delayMs;
+            }
+            throw e;
+        } finally {
+            try { if (password.buffer.byteLength > 0) password.fill(0); } catch {}
+        }
+    }
+
+    getLockoutRemaining(): number {
+        if (this.lockoutUntil <= 0) return 0;
+        const remaining = this.lockoutUntil - Date.now();
+        if (remaining <= 0) {
+            this.lockoutUntil = 0;
+            return 0;
+        }
+        return remaining;
+    }
+
+    onLockoutReady(callback: () => void): void {
+        this.lockoutCallback = callback;
+    }
+
+    notifyLockoutReady(): void {
+        if (this.lockoutCallback) {
+            this.lockoutCallback();
+            this.lockoutCallback = null;
+        }
     }
 
     async lockVault(): Promise<void> {
         await this.sendMessage('LOCK');
+        // Reject all pending — worker will not respond after LOCK
+        for (const [, pending] of this.pendingMessages) {
+            pending.reject(new Error('Vault locked'));
+        }
+        this.pendingMessages.clear();
         this.isLocked = true;
         this.unlockPromise = null;
         this.plugin.app.workspace.trigger('uwu-crypt:lock');
@@ -130,16 +250,27 @@ export class VaultManager {
         return this.unlockPromise;
     }
 
+    private workerBlobUrl: string | null = null;
+
     destroy(): void {
+        // Reject all pending
+        for (const [, pending] of this.pendingMessages) {
+            pending.reject(new Error('Worker destroyed'));
+        }
+        this.pendingMessages.clear();
         this.worker.terminate();
+        if (this.workerBlobUrl) {
+            URL.revokeObjectURL(this.workerBlobUrl);
+            this.workerBlobUrl = null;
+        }
         if (this.sessionTimeoutTimer) {
             window.clearTimeout(this.sessionTimeoutTimer);
         }
     }
 
-    async testPerformance(m: number, t: number): Promise<number> {
+    async testPerformance(m: number, t: number, onProgress?: (p: number) => void): Promise<number> {
         const start = performance.now();
-        await this.sendMessage('TEST_PERF', { m, t });
+        await this.sendMessage('TEST_PERF', { m, t }, onProgress);
         return performance.now() - start;
     }
 
@@ -153,52 +284,103 @@ export class VaultManager {
         return plaintext;
     }
 
-    private async saveManifest(manifest: Uint8Array) {
-        // Redundancy: .uwu/vault.uwu and plugin data.json
-        const base64 = btoa(String.fromCharCode(...manifest));
+    private readonly MIN_MANIFEST_SIZE = 64; // signature (16) + auth_hash (32) + salts + msgpack overhead
+
+    public isManifestHealthy(data: Uint8Array | null): boolean {
+        if (!data || data.length < this.MIN_MANIFEST_SIZE) return false;
         
-        // Save to .uwu/vault.uwu
-        const folder = this.plugin.app.vault.getAbstractFileByPath('.uwu');
-        if (!folder) {
-            await this.plugin.app.vault.createFolder('.uwu');
+        // 1. Check for all zeros
+        let allZeros = true;
+        for (let i = 0; i < Math.min(data.length, 100); i++) {
+            if (data[i] !== 0) { allZeros = false; break; }
         }
+        if (allZeros) return false;
+
+        if (!this.signature) return true; // If signature unknown yet, just trust size
+
+        // 2. Search for the 16-byte signature within first chunk
+        const sig = this.signature;
+        for (let i = 0; i < Math.min(16, data.length - sig.length); i++) {
+            let match = true;
+            for (let j = 0; j < sig.length; j++) {
+                if (data[i + j] !== sig[j]) { match = false; break; }
+            }
+            if (match) return true;
+        }
+        return false;
+    }
+
+    private async saveManifest(manifest: Uint8Array) {
+        const adapter = this.plugin.app.vault.adapter;
         const vaultFile = '.uwu/vault.uwu';
-        const existing = this.plugin.app.vault.getAbstractFileByPath(vaultFile);
-        if (existing instanceof TFile) {
-            await this.plugin.app.vault.modify(existing, base64);
-        } else {
-            await this.plugin.app.vault.create(vaultFile, base64);
+        const folder = '.uwu';
+
+        // 1. Create folder if missing
+        if (!(await adapter.exists(folder))) {
+            await adapter.mkdir(folder);
         }
 
-        // Save to data.json
+        // 2. Save Base64 to physical file
+        const base64 = this.uint8ToBase64(manifest);
+        await adapter.write(vaultFile, base64);
+
+        // 3. Save to settings backup
         (this.plugin as any).settings.manifestBackup = base64;
         await (this.plugin as any).saveSettings();
     }
 
     private async getManifest(): Promise<Uint8Array | null> {
+        const adapter = this.plugin.app.vault.adapter;
         const vaultFile = '.uwu/vault.uwu';
-        const file = this.plugin.app.vault.getAbstractFileByPath(vaultFile);
-        let base64: string | null = null;
-
-        if (file instanceof TFile) {
-            base64 = (await this.plugin.app.vault.read(file)).trim();
-        } else {
-            // Restore from backup
-            base64 = (this.plugin as any).settings.manifestBackup;
-        }
-
-        if (!base64) return null;
+        
+        // 1. Try physical file
         try {
-            const binaryString = atob(base64);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
+            if (await adapter.exists(vaultFile)) {
+                const content = await adapter.read(vaultFile);
+                const v_raw = this.base64ToUint8(content.trim());
+                if (this.isManifestHealthy(v_raw)) return v_raw;
             }
-            return bytes;
         } catch (e) {
-            console.error("(⊙ˍ⊙) Failed to decode base64 manifest", e);
-            return null;
+            console.warn('Physical manifest load/health check failed:', e);
         }
+
+        // 2. Fallback to settings backup
+        const b_base64 = (this.plugin as any).settings.manifestBackup;
+        if (b_base64) {
+            try { 
+                const b_raw = this.base64ToUint8(b_base64.trim()); 
+                if (this.isManifestHealthy(b_raw)) return b_raw;
+            } catch {}
+        }
+
+        return null;
+    }
+
+    public uint8ToBase64(arr: Uint8Array): string {
+        let binary = '';
+        const len = arr.byteLength;
+        for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(arr[i]);
+        }
+        return btoa(binary);
+    }
+
+    public base64ToUint8(base64: string): Uint8Array {
+        const binaryString = atob(base64);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes;
+    }
+
+    private arraysEqual(a: Uint8Array, b: Uint8Array | null): boolean {
+        if (!b || a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            if (a[i] !== b[i]) return false;
+        }
+        return true;
     }
 
     private startSessionTimer() {

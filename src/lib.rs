@@ -14,12 +14,27 @@ const STEALTH_SIG_KEY: &[u8] = b"UWU_V1";
 const ARGON_P: u32 = 1;
 const ARGON_OUT_LEN: usize = 32;
 
-#[derive(Serialize, Deserialize)]
+use std::sync::Mutex;
+static SCRATCH_BUFFER: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+#[wasm_bindgen]
+pub fn init_panic_hook() {
+    console_error_panic_hook::set_once();
+}
+
+#[wasm_bindgen]
+pub fn zeroize_scratch() {
+    SCRATCH_BUFFER.lock().expect("Failed to lock scratch buffer").zeroize();
+}
+
+#[derive(Serialize, Deserialize, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct VaultManifest {
     #[serde(with = "serde_bytes")]
     signature: [u8; 16],
     #[serde(with = "serde_bytes")]
     auth_hash: [u8; 32],
+    #[serde(with = "serde_bytes")]
+    manifest_hmac: [u8; 32],
     #[serde(with = "serde_bytes")]
     salt_mix: Vec<u8>,
     #[serde(with = "serde_bytes")]
@@ -62,39 +77,52 @@ fn derive_argon2id(password: &[u8], salt: &[u8], m: u32, t: u32) -> Result<[u8; 
 }
 
 fn derive_master_key(
-    password: &str,
+    password: &[u8],
     s_mix: &[u8],
     s_argon1: &[u8],
     s_argon2: &[u8],
     m: u32,
     t: u32,
+    progress_callback: Option<&js_sys::Function>,
 ) -> Result<[u8; 32], String> {
     // 1. Entropy Expansion via BLAKE3
     let mut hasher = blake3::Hasher::new();
-    hasher.update(password.as_bytes());
+    hasher.update(password);
     hasher.update(s_mix);
     let mut seed = *hasher.finalize().as_bytes();
 
     // 2. Dual-Track Hardening
-    // Split 32-byte seed into two 16-byte independent inputs
-    let h1 = derive_argon2id(&seed[0..16], s_argon1, m, t)?;
-    let h2 = derive_argon2id(&seed[16..32], s_argon2, m, t)?;
+    // Track 1
+    let mut h1 = derive_argon2id(&seed[0..16], s_argon1, m, t)?;
+    
+    // Progress Report: 50%. We ignore the Result because JS exceptions 
+    // in the callback should not interrupt the cryptographic process.
+    if let Some(cb) = progress_callback {
+        let _ = cb.call1(&JsValue::NULL, &JsValue::from(50.0));
+    }
+
+    // Track 2
+    let mut h2 = derive_argon2id(&seed[16..32], s_argon2, m, t)?;
+    
     seed.zeroize();
 
     // 3. Final Master Key mixing
     let mut final_hasher = blake3::Hasher::new();
     final_hasher.update(&h1);
     final_hasher.update(&h2);
+    h1.zeroize();
+    h2.zeroize();
     Ok(*final_hasher.finalize().as_bytes())
 }
 
 #[wasm_bindgen]
 impl UwuCore {
     #[wasm_bindgen]
-    pub async fn create_vault(
-        password: &str,
+    pub fn create_vault(
+        password: &[u8],
         m: u32,
         t: u32,
+        progress_callback: Option<js_sys::Function>,
     ) -> Result<JsValue, String> {
         let mut s_mix = [0u8; 64];
         let mut s_argon1 = [0u8; 64];
@@ -103,7 +131,12 @@ impl UwuCore {
         getrandom::fill(&mut s_argon1).map_err(|e| e.to_string())?;
         getrandom::fill(&mut s_argon2).map_err(|e| e.to_string())?;
 
-        let mut raw_master_key = derive_master_key(password, &s_mix, &s_argon1, &s_argon2, m, t)?;
+        let mut raw_master_key = derive_master_key(password, &s_mix, &s_argon1, &s_argon2, m, t, progress_callback.as_ref())?;
+        
+        // Progress Report: 75%. Same as above, exceptions are ignored to ensure vault creation completes.
+        if let Some(cb) = progress_callback.as_ref() {
+            let _ = cb.call1(&JsValue::NULL, &JsValue::from(75.0));
+        }
         let mut ephemeral_mask = [0u8; 32];
         getrandom::fill(&mut ephemeral_mask).map_err(|e| e.to_string())?;
 
@@ -119,11 +152,31 @@ impl UwuCore {
         let mut auth_hash = [0u8; 32];
         auth_hash.copy_from_slice(auth_hash_full.as_bytes());
 
+        // Создаём manifest без manifest_hmac для вычисления HMAC
+        let manifest_partial = VaultManifest {
+            signature,
+            auth_hash,
+            manifest_hmac: [0u8; 32],
+            salt_mix: s_mix.to_vec(),
+            salt_argon1: s_argon1.to_vec(),
+            salt_argon2: s_argon2.to_vec(),
+            argon_m: m,
+            argon_t: t,
+        };
+        let mut manifest_bytes_partial = rmp_serde::to_vec(&manifest_partial).map_err(|e| e.to_string())?;
+
+        // Вычисляем HMAC manifest из master_key
+        let hmac = blake3::keyed_hash(&raw_master_key, &manifest_bytes_partial);
+        let mut manifest_hmac = [0u8; 32];
+        manifest_hmac.copy_from_slice(hmac.as_bytes());
+
+        manifest_bytes_partial.zeroize(); // Wipe partial manifest buffer
         raw_master_key.zeroize();
 
         let manifest = VaultManifest {
             signature,
             auth_hash,
+            manifest_hmac,
             salt_mix: s_mix.to_vec(),
             salt_argon1: s_argon1.to_vec(),
             salt_argon2: s_argon2.to_vec(),
@@ -144,9 +197,10 @@ impl UwuCore {
     }
 
     #[wasm_bindgen]
-    pub async fn unlock_vault(
-        password: &str,
+    pub fn unlock_vault(
+        password: &[u8],
         manifest_bytes: &[u8],
+        progress_callback: Option<js_sys::Function>,
     ) -> Result<UwuCore, String> {
         let manifest: VaultManifest =
             rmp_serde::from_slice(manifest_bytes).map_err(|e| e.to_string())?;
@@ -162,7 +216,31 @@ impl UwuCore {
             &manifest.salt_argon2,
             manifest.argon_m,
             manifest.argon_t,
+            progress_callback.as_ref(),
         )?;
+
+        // Progress Report: 75%
+        if let Some(cb) = progress_callback.as_ref() {
+            let _ = cb.call1(&JsValue::NULL, &JsValue::from(75.0));
+        }
+
+        // Проверяем HMAC manifest
+        let manifest_for_check = VaultManifest {
+            signature: manifest.signature,
+            auth_hash: manifest.auth_hash,
+            manifest_hmac: [0u8; 32],
+            salt_mix: manifest.salt_mix.clone(),
+            salt_argon1: manifest.salt_argon1.clone(),
+            salt_argon2: manifest.salt_argon2.clone(),
+            argon_m: manifest.argon_m,
+            argon_t: manifest.argon_t,
+        };
+        let manifest_bytes_partial = rmp_serde::to_vec(&manifest_for_check).map_err(|e| e.to_string())?;
+        let expected_hmac = blake3::keyed_hash(&raw_master_key, &manifest_bytes_partial);
+        if manifest.manifest_hmac != *expected_hmac.as_bytes() {
+            raw_master_key.zeroize();
+            return Err("Invalid manifest integrity".to_string());
+        }
 
         let mut auth_check = *blake3::keyed_hash(&raw_master_key, b"UWU_AUTH_CHECK").as_bytes();
         if auth_check != manifest.auth_hash {
@@ -188,12 +266,12 @@ impl UwuCore {
     }
 
     #[wasm_bindgen]
-    pub fn test_performance(m: u32, t: u32) -> Result<(), String> {
-        let pass = "benchmark_password";
+    pub fn test_performance(m: u32, t: u32, progress_callback: Option<js_sys::Function>) -> Result<(), String> {
+        let pass = b"benchmark_password";
         let s_mix = [0u8; 64];
         let s_argon1 = [0u8; 64];
         let s_argon2 = [0u8; 64];
-        derive_master_key(pass, &s_mix, &s_argon1, &s_argon2, m, t)?;
+        derive_master_key(pass, &s_mix, &s_argon1, &s_argon2, m, t, progress_callback.as_ref())?;
         Ok(())
     }
 
@@ -235,7 +313,7 @@ impl UwuCore {
     }
 
     #[wasm_bindgen]
-    pub fn decrypt_file(&self, package_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn decrypt_file(&self, package_bytes: &[u8]) -> Result<js_sys::Uint8Array, String> {
         let package: FilePackage =
             rmp_serde::from_slice(package_bytes).map_err(|e| e.to_string())?;
         let mut unmasked_key = [0u8; 32];
@@ -258,9 +336,14 @@ impl UwuCore {
             .decrypt(&x_nonce, package.ciphertext.as_slice())
             .map_err(|e| format!("File decryption failed: {}", e))?;
 
-        let decompressed = decode_all(compressed.as_slice()).map_err(|e| e.to_string());
+        let decompressed = decode_all(compressed.as_slice()).map_err(|e| e.to_string())?;
         compressed.zeroize();
-        decompressed
+
+        // Write result to scratch buffer to ensure physical erasure on demand
+        let mut buf = SCRATCH_BUFFER.lock().expect("Failed to lock scratch buffer");
+        buf.zeroize();
+        *buf = decompressed;
+        Ok(unsafe { js_sys::Uint8Array::view(buf.as_slice()) })
     }
 
     #[wasm_bindgen]

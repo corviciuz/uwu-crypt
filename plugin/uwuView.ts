@@ -106,7 +106,7 @@ export class UwuView extends FileView {
             
             const btn = inner.createEl("button", { text: "Unlock Vault", cls: "uwu-unlock-button" });
             btn.addEventListener("click", () => {
-                 this.vaultManager.requestUnlock();
+                 this.vaultManager.requestUnlock().catch(() => {});
             });
         } else {
             this.lockedEl.style.display = 'flex';
@@ -138,6 +138,7 @@ export class UwuView extends FileView {
             const ciphertext = new Uint8Array(encryptedData).slice(sig.length);
             const plaintext = await this.vaultManager.decrypt(ciphertext);
             const content = new TextDecoder().decode(plaintext);
+            try { if (plaintext.buffer.byteLength > 0) plaintext.fill(0); } catch {}
 
             if (!this.decryptedEl) {
                 this.decryptedEl = this.contentEl.createDiv({ cls: "uwu-decrypted-content" });
