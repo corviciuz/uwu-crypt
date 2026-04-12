@@ -3,7 +3,7 @@
 	"name": "UWU-Crypt",
 	"version": "0.3.0",
 	"minAppVersion": "1.4.0",
-	"description": "High-performance file encryption for Obsidian using Rust WASM.",
+	"description": "High-security transparent file encryption for Obsidian, powered by Rust/WebAssembly.",
 	"author": "corviciuz",
 	"authorUrl": "https://github.com/corviciuz",
 	"isDesktopOnly": false
