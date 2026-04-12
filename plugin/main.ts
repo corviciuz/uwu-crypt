@@ -1016,41 +1016,46 @@ export default class UwuCryptPlugin extends Plugin {
 
     private applyIndicator(el: HTMLElement) {
         const show = this.settings.showIndicators;
-        if (!show) return;
-
         const isFolder = el.hasClass('nav-folder');
-        const path = el.getAttribute('data-path') || 
+        const path = el.getAttribute('data-path') ||
                      el.querySelector(isFolder ? '.nav-folder-title' : '.nav-file-title')?.getAttribute('data-path');
 
         if (!path) return;
         const np = normalizePath(path);
 
-        let locked = false;
-        if (isFolder) {
-            locked = (this.settings.encryptedFolders || []).some(f => {
-                const nf = normalizePath(f);
-                return np === nf || np.startsWith(nf + '/');
-            });
-        } else {
-            locked = this.encryptedPaths.has(np);
-        }
+        if (show) {
+            let locked = false;
+            if (isFolder) {
+                locked = (this.settings.encryptedFolders || []).some(f => {
+                    const nf = normalizePath(f);
+                    return np === nf || np.startsWith(nf + '/');
+                });
+            } else {
+                locked = this.encryptedPaths.has(np);
+            }
 
-        const titleContent = el.querySelector(isFolder ? '.nav-folder-title-content' : '.nav-file-title-content') || 
-                             el.querySelector(isFolder ? '.nav-folder-title' : '.nav-file-title') || el;
+            if (locked) {
+                if (isFolder) el.addClass('is-encrypted-root');
+                else el.addClass('is-encrypted');
 
-        if (locked) {
-            if (isFolder) el.addClass('is-encrypted-root');
-            else el.addClass('is-encrypted');
-
-            if (!el.querySelector('.uwu-icon-lock')) {
-                const iconSpan = document.createElement('span');
-                iconSpan.addClass('uwu-icon-lock');
-                setIcon(iconSpan, 'lock');
-                titleContent.prepend(iconSpan);
+                if (!el.querySelector('.uwu-icon-lock')) {
+                    const iconSpan = document.createElement('span');
+                    iconSpan.addClass('uwu-icon-lock');
+                    setIcon(iconSpan, 'lock');
+                    const titleContent = el.querySelector(isFolder ? '.nav-folder-title-content' : '.nav-file-title-content') ||
+                                         el.querySelector(isFolder ? '.nav-folder-title' : '.nav-file-title') || el;
+                    titleContent.prepend(iconSpan);
+                }
+            } else {
+                el.removeClass('is-encrypted');
+                el.removeClass('is-encrypted-root');
+                el.querySelector('.uwu-icon-lock')?.remove();
             }
         } else {
+            // Clean up all indicator elements
             el.removeClass('is-encrypted');
             el.removeClass('is-encrypted-root');
+            el.querySelectorAll('.uwu-icon-lock').forEach(icon => icon.remove());
             el.querySelector('.uwu-icon-lock')?.remove();
         }
     }
