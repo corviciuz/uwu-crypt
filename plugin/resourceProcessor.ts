@@ -1,6 +1,8 @@
 import { App, TFile } from 'obsidian';
 import { VaultManager } from './vaultManager.ts';
 
+const BLOB_TTL = 30000; // 30s — blob URLs need time for streaming, seek, preload
+
 export class ResourceProcessor {
     private blobCache = new Map<string, { url: string; timer: number | null }>(); // path -> { url, timer }
 
@@ -22,9 +24,8 @@ export class ResourceProcessor {
     getCachedBlobUrl(path: string): string | undefined {
         const entry = this.blobCache.get(path);
         if (entry) {
-            // Продлеваем TTL при каждом доступе
             if (entry.timer) clearTimeout(entry.timer);
-            entry.timer = window.setTimeout(() => this.revokeUrl(path), 500); // 500ms — minimize blob residence
+            entry.timer = window.setTimeout(() => this.revokeUrl(path), BLOB_TTL);
             return entry.url;
         }
         return undefined;
@@ -33,9 +34,8 @@ export class ResourceProcessor {
     async getDecryptedBlobUrl(file: TFile): Promise<string | null> {
         if (this.blobCache.has(file.path)) {
             const entry = this.blobCache.get(file.path)!;
-            // Продлеваем TTL при кеш-хите
             if (entry.timer) clearTimeout(entry.timer);
-            entry.timer = window.setTimeout(() => this.revokeUrl(file.path), 500);
+            entry.timer = window.setTimeout(() => this.revokeUrl(file.path), BLOB_TTL);
             return entry.url;
         }
 
@@ -43,7 +43,6 @@ export class ResourceProcessor {
         await (this.vaultManager as any).readyPromise;
 
         try {
-            // Читаем сырые данные через original adapter, минуя хук расшифровки
             const adapter = this.app.vault.adapter;
             const buffer = this.originalReadBinary
                 ? await this.originalReadBinary(file.path)
@@ -54,18 +53,16 @@ export class ResourceProcessor {
                 const ciphertext = new Uint8Array(buffer).slice(sigLen);
                 const plaintext = await this.vaultManager.decrypt(ciphertext);
 
-                // Determine MIME type from extension
                 const ext = file.extension.toLowerCase();
                 const mimeType = this.getMimeType(ext);
 
                 const blob = new Blob([plaintext as any], { type: mimeType });
                 const url = URL.createObjectURL(blob);
 
-                // Автоотзыв через 500ms
-                const timer = window.setTimeout(() => this.revokeUrl(file.path), 500);
+                const timer = window.setTimeout(() => this.revokeUrl(file.path), BLOB_TTL);
                 this.blobCache.set(file.path, { url, timer });
                 try { if (plaintext.buffer.byteLength > 0) plaintext.fill(0); } catch {}
-                
+
                 return url;
             }
         } catch (e) {
