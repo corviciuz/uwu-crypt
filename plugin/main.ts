@@ -554,6 +554,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         adapter.read = async (path: string): Promise<string> => {
+            this.assertPatchIntegrity();
             try {
                 await (this.vaultManager as any).readyPromise;
                 const buffer = await this.originalAdapterReadBinary.call(adapter, path);
@@ -577,6 +578,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         adapter.readBinary = async (path: string): Promise<ArrayBuffer> => {
+            this.assertPatchIntegrity();
             await (this.vaultManager as any).readyPromise;
             const buffer = await this.originalAdapterReadBinary.call(adapter, path);
             const sigLen = this.getSignatureLength(buffer);
@@ -594,6 +596,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         adapter.write = async (path: string, data: string, options?: DataWriteOptions): Promise<void> => {
+            this.assertPatchIntegrity();
             const shouldEncrypt = this.fileProcessor.shouldEncryptPath(path) || this.encryptedPaths.has(path);
             if (!this.fileProcessor.isProcessing(path) && shouldEncrypt && this.monkeyPatchActive) {
                 await blockIfLocked(path, "write to");
@@ -611,6 +614,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         (adapter as any).writeBinary = async (path: string, data: ArrayBuffer, options?: DataWriteOptions): Promise<void> => {
+            this.assertPatchIntegrity();
             const shouldEncrypt = this.fileProcessor.shouldEncryptPath(path) || this.encryptedPaths.has(path);
             if (!this.fileProcessor.isProcessing(path) && shouldEncrypt && this.monkeyPatchActive) {
                 await blockIfLocked(path, "write binary to");
@@ -627,6 +631,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         adapter.process = async (path: string, fn: (data: string) => string, options?: DataWriteOptions): Promise<string> => {
+            this.assertPatchIntegrity();
             await (this.vaultManager as any).readyPromise;
             if (!this.fileProcessor.isProcessing(path) && (this.fileProcessor.shouldEncryptPath(path) || this.isEncrypted(await this.originalAdapterReadBinary.call(adapter, path)))) {
                  // Vault must be unlocked to process encrypted files
@@ -640,6 +645,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         (adapter as any).append = async (path: string, data: string, options?: DataWriteOptions): Promise<void> => {
+            this.assertPatchIntegrity();
             await (this.vaultManager as any).readyPromise;
             if (!this.fileProcessor.isProcessing(path) && (this.fileProcessor.shouldEncryptPath(path) || this.isEncrypted(await this.originalAdapterReadBinary.call(adapter, path)))) {
                 await blockIfLocked(path, "append to");
@@ -651,6 +657,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         (adapter as any).appendBinary = async (path: string, data: ArrayBuffer, options?: DataWriteOptions): Promise<void> => {
+            this.assertPatchIntegrity();
             await (this.vaultManager as any).readyPromise;
             if (!this.fileProcessor.isProcessing(path) && (this.fileProcessor.shouldEncryptPath(path) || this.isEncrypted(await this.originalAdapterReadBinary.call(adapter, path)))) {
                 await blockIfLocked(path, "append binary to");
@@ -664,6 +671,7 @@ export default class UwuCryptPlugin extends Plugin {
         };
 
         (adapter as any).copy = async (path: string, newPath: string): Promise<void> => {
+            this.assertPatchIntegrity();
             if (!this.fileProcessor.isProcessing(path) && (this.fileProcessor.shouldEncryptPath(newPath) || this.fileProcessor.shouldEncryptPath(path))) {
                 await blockIfLocked(newPath, "copy to");
                 const data = await adapter.readBinary(path);
@@ -697,22 +705,15 @@ export default class UwuCryptPlugin extends Plugin {
         if (!this.monkeyPatchActive) {
             throw new Error('(⊙ˍ⊙) UWU-Crypt: Monkey-patch failed! Filesystem interception is not active. Plugin disabled to prevent plaintext leaks.');
         }
+    }
 
-        // Periodic integrity check — verify patches are still ours every 30s
-        const integrityInterval = window.setInterval(() => {
-            if (this.monkeyPatchActive) {
-                const stillIntact = (
-                    adapter.read === this._patchedRead &&
-                    adapter.readBinary === this._patchedReadBinary &&
-                    adapter.write === this._patchedWrite
-                );
-                if (!stillIntact) {
-                    console.warn('(⊙ˍ⊙) UWU-Crypt: Monkey-patch integrity compromised! Another plugin may have overwritten our hooks.');
-                    this.monkeyPatchActive = false;
-                }
-            }
-        }, 30000);
-        this.register(() => clearInterval(integrityInterval));
+    private assertPatchIntegrity() {
+        if (this.app.vault.adapter.read !== this._patchedRead ||
+            this.app.vault.adapter.readBinary !== this._patchedReadBinary ||
+            this.app.vault.adapter.write !== this._patchedWrite) {
+            this.monkeyPatchActive = false;
+            throw new Error('(⊙ˍ⊙) UWU-Crypt: Monkey-patch integrity compromised! Another plugin has overwritten our hooks.');
+        }
     }
 
     private isEncrypted(buffer: ArrayBufferLike): boolean {
