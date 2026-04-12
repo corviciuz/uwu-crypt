@@ -59,3 +59,13 @@ Files on disk retain their original filenames and extensions to maintain compati
 - **Vault Manifest**: Configuration is stored in `.uwu/vault.uwu` using Base64 encoding. It contains salts, Argon2id costs ($M, T$), and an encrypted verification token.
 - **Binary Signature**: Every encrypted file starts with a unique 16-byte `UWU_V1` signature for instant identification.
 - **Serialization**: Salt and encryption parameters are packed using the **MessagePack** format, ensuring a minimal metadata overhead.
+
+---
+
+## Security Limitations
+
+### JavaScript String Immutability
+Decrypted plaintext strings in JavaScript are **immutable** and cannot be explicitly zeroed. While Rust/WASM memory is properly sanitized (all buffers, keys, and salts are zeroized after use), decrypted text content passed to the UI layer remains in the JS engine heap until garbage collection. The decryption cache TTL is set to 500ms to minimize this window, but users with extreme security requirements should be aware of this fundamental WASM+JS platform limitation.
+
+### Monkey-Patch Integrity
+The plugin intercepts Obsidian's `DataAdapter` methods via monkey-patching. If another plugin modifies the adapter after UWU-Crypt initialization, integrity checks will detect this and throw an error. In such cases, disable conflicting plugins or use the "Emergency: Disable Auto-Encrypt" command.

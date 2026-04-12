@@ -1,6 +1,6 @@
 [package]
 name = "uwu-crypt"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [lib]
@@ -8,16 +8,17 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 chacha20poly1305 = "0.11.0-rc.3"
+chacha20 = "0.10.0"
 argon2 = "0.6.0-rc.8"
 zeroize = { version = "1.8.2", features = ["derive"] }
 getrandom = { version = "0.4.2", features = ["wasm_js"] }
 serde = { version = "1.0.228", features = ["derive"] }
 rmp-serde = "1.3.1"
-blake3 = "1.8.3"
+blake3 = "1.8.4"
 zstd = "0.13.3"
-wasm-bindgen = "0.2.92"
-js-sys = "0.3.91"
-wasm-bindgen-futures = "0.4.64"
+wasm-bindgen = "0.2.118"
+js-sys = "0.3.95"
+wasm-bindgen-futures = "0.4.68"
 serde_bytes = "0.11.19"
 console_error_panic_hook = "0.1.7"
 

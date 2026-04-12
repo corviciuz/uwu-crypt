@@ -24,7 +24,7 @@ export class ResourceProcessor {
         if (entry) {
             // Продлеваем TTL при каждом доступе
             if (entry.timer) clearTimeout(entry.timer);
-            entry.timer = window.setTimeout(() => this.revokeUrl(path), 30000); // 30 сек
+            entry.timer = window.setTimeout(() => this.revokeUrl(path), 500); // 500ms — minimize blob residence
             return entry.url;
         }
         return undefined;
@@ -35,7 +35,7 @@ export class ResourceProcessor {
             const entry = this.blobCache.get(file.path)!;
             // Продлеваем TTL при кеш-хите
             if (entry.timer) clearTimeout(entry.timer);
-            entry.timer = window.setTimeout(() => this.revokeUrl(file.path), 30000);
+            entry.timer = window.setTimeout(() => this.revokeUrl(file.path), 500);
             return entry.url;
         }
 
@@ -61,8 +61,8 @@ export class ResourceProcessor {
                 const blob = new Blob([plaintext as any], { type: mimeType });
                 const url = URL.createObjectURL(blob);
 
-                // Автоотзыв через 30 сек
-                const timer = window.setTimeout(() => this.revokeUrl(file.path), 30000);
+                // Автоотзыв через 500ms
+                const timer = window.setTimeout(() => this.revokeUrl(file.path), 500);
                 this.blobCache.set(file.path, { url, timer });
                 try { if (plaintext.buffer.byteLength > 0) plaintext.fill(0); } catch {}
                 

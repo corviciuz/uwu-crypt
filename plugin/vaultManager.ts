@@ -88,14 +88,15 @@ export class VaultManager {
         return new Promise((resolve, reject) => {
             const id = this.messageId++;
             this.pendingMessages.set(id, { resolve, reject, onProgress });
-            
+
             // Use Transfer Lists for memory safety and performance
             const transfers: Transferable[] = [];
             if (payload) {
                 if (payload.password instanceof Uint8Array) transfers.push(payload.password.buffer);
                 if (payload.data instanceof Uint8Array) transfers.push(payload.data.buffer);
                 if (payload.wasmBuffer instanceof ArrayBuffer) transfers.push(payload.wasmBuffer);
-                // Removed payload.payload transfer to avoid detaching manifests/small metadata needed after worker calls
+                // Manifest transfer for zeroization in worker
+                if (payload.payload instanceof Uint8Array) transfers.push(payload.payload.buffer);
             }
 
             this.worker.postMessage({ id, type, payload }, transfers);
@@ -130,19 +131,22 @@ export class VaultManager {
         let manifest = manifestOverride || await this.getManifest();
         if (!manifest) throw new Error('No vault configuration found');
 
+        // Clone manifest before transfer — worker will detach the original buffer
+        const manifestClone = new Uint8Array(manifest);
+
         try {
             await this.sendMessage('UNLOCK', { password, payload: manifest }, onProgress);
             this.failedAttempts = 0;
             // If we got here, the manifest is cryptographically verified (Argon2 check inside WASM passed)
             // --- HMAC OK! START SYNC / RESTORATION ---
-            const m_b64 = this.uint8ToBase64(manifest);
+            const m_b64 = this.uint8ToBase64(manifestClone);
             const settings = (this.plugin as any).settings;
 
             // 1. Sync Backup if missing or broken or different
             let backupValid = false;
             try {
                 const b_raw = this.base64ToUint8(settings.manifestBackup || "");
-                if (this.isManifestHealthy(b_raw) && this.arraysEqual(manifest, b_raw)) backupValid = true;
+                if (this.isManifestHealthy(b_raw) && this.arraysEqual(manifestClone, b_raw)) backupValid = true;
             } catch {}
 
             if (!backupValid || manifestOverride) {
@@ -160,13 +164,13 @@ export class VaultManager {
                     if (await adapter.exists(vaultFile)) {
                         const content = await adapter.read(vaultFile);
                         const v_raw = this.base64ToUint8(content.trim());
-                        if (this.isManifestHealthy(v_raw) && this.arraysEqual(manifest, v_raw)) fileValid = true;
+                        if (this.isManifestHealthy(v_raw) && this.arraysEqual(manifestClone, v_raw)) fileValid = true;
                     }
                 } catch {}
             }
 
             if (!fileValid) {
-                await this.saveManifest(manifest);
+                await this.saveManifest(manifestClone);
                 if (manifestOverride) {
                     new Notice('(⌐■_■) Vault initialized with your manifest');
                 } else {
@@ -187,6 +191,7 @@ export class VaultManager {
             throw e;
         } finally {
             try { if (password.buffer.byteLength > 0) password.fill(0); } catch {}
+            try { if (manifestClone.byteLength > 0) manifestClone.fill(0); } catch {}
         }
     }
 

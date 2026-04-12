@@ -44,6 +44,9 @@ export default class UwuCryptPlugin extends Plugin {
     private originalAdapterRmdir!: any;
     private originalAdapterRename!: any;
     private originalAdapterGetResourcePath!: any;
+    private _patchedRead!: any;
+    private _patchedReadBinary!: any;
+    private _patchedWrite!: any;
     private ribbonIconEl!: HTMLElement;
     private lazyResourceObserver!: IntersectionObserver;
     private encryptedPaths: Set<string> = new Set();
@@ -52,7 +55,7 @@ export default class UwuCryptPlugin extends Plugin {
     private isUpdatingRibbon = false;
     private monkeyPatchActive = false;
 
-    private decryptionCache = new Map<string, Promise<{ data: Uint8Array, mask: Uint8Array }>>();
+    private decryptionCache = new Map<string, Promise<{ data: Uint8Array, nonce: Uint8Array }>>();
     private decryptionTimers = new Map<string, number>(); // path -> timer id
 
     async onload() {
@@ -369,12 +372,8 @@ export default class UwuCryptPlugin extends Plugin {
                             popstate: true
                         } as any);
                     } else {
-                        // VERY forceful refresh: swap to empty then back to native
-                        const active = leaf === this.app.workspace.getMostRecentLeaf();
-                        await leaf.setViewState({ type: 'empty' }, { history: false });
-                        setTimeout(() => {
-                           leaf.setViewState({ ...state, active }, { history: false });
-                        }, 50);
+                        // Direct onLoadFile — no empty swap hack
+                        try { (leaf.view as any).onLoadFile?.(file); } catch (e) { leaf.view.load(); }
                     }
                 }
             });
@@ -390,9 +389,9 @@ export default class UwuCryptPlugin extends Plugin {
 
             const entries = Array.from(this.decryptionCache.values());
             for (const promise of entries) {
-                promise.then(({ data, mask }) => {
+                promise.then(({ data, nonce }) => {
                     try { if (data.buffer.byteLength > 0) data.fill(0); } catch {}
-                    try { if (mask.buffer.byteLength > 0) mask.fill(0); } catch {}
+                    try { if (nonce.buffer.byteLength > 0) nonce.fill(0); } catch {}
                 }).catch(() => {});
             }
             this.decryptionCache.clear();
@@ -563,10 +562,10 @@ export default class UwuCryptPlugin extends Plugin {
                     if (!this.vaultManager.unlocked()) {
                         return "%% (⊙ˍ⊙) File is locked. Please unlock the vault to view this content. %%";
                     }
-                    
+
                     const ciphertext = new Uint8Array(buffer).slice(sigLen);
                     const plaintext = await this.vaultManager.decrypt(ciphertext);
-                    
+
                     const text = new TextDecoder().decode(plaintext);
                     plaintext.fill(0);
                     return text;
@@ -585,9 +584,8 @@ export default class UwuCryptPlugin extends Plugin {
                 if (!this.vaultManager.unlocked()) {
                     return buffer; // Return encrypted data if locked
                 }
-                const { data, mask } = await this.getCachedDecryption(path, buffer);
-                const unmasked = new Uint8Array(data);
-                this.maskData(unmasked, mask);
+                const cached = await this.getCachedDecryption(path, buffer);
+                const unmasked = await this.unmaskData(new Uint8Array(cached.data), cached.nonce);
                 const result = unmasked.buffer.slice(unmasked.byteOffset, unmasked.byteOffset + unmasked.byteLength) as ArrayBuffer;
                 unmasked.fill(0);
                 return result;
@@ -617,12 +615,12 @@ export default class UwuCryptPlugin extends Plugin {
             if (!this.fileProcessor.isProcessing(path) && shouldEncrypt && this.monkeyPatchActive) {
                 await blockIfLocked(path, "write binary to");
                 const encrypted = await this.vaultManager.encrypt(new Uint8Array(data), this.settings.zstdLevel);
-                
+
                 const sig = this.vaultManager.signature;
                 const combined = new Uint8Array(sig.length + encrypted.length);
                 combined.set(sig);
                 combined.set(encrypted, sig.length);
-                
+
                 return this.originalAdapterWriteBinary.call(adapter, path, combined.buffer, options);
             }
             return this.originalAdapterWriteBinary.call(adapter, path, data, options);
@@ -683,6 +681,11 @@ export default class UwuCryptPlugin extends Plugin {
             return this.originalAdapterGetResourcePath.call(adapter, path);
         };
 
+        // Store references to our patched functions for integrity checks
+        this._patchedRead = adapter.read;
+        this._patchedReadBinary = adapter.readBinary;
+        this._patchedWrite = adapter.write;
+
         // Проверка целостности monkey-patch
         this.monkeyPatchActive = (
             adapter.read !== this.originalAdapterRead &&
@@ -694,6 +697,22 @@ export default class UwuCryptPlugin extends Plugin {
         if (!this.monkeyPatchActive) {
             throw new Error('(⊙ˍ⊙) UWU-Crypt: Monkey-patch failed! Filesystem interception is not active. Plugin disabled to prevent plaintext leaks.');
         }
+
+        // Periodic integrity check — verify patches are still ours every 30s
+        const integrityInterval = window.setInterval(() => {
+            if (this.monkeyPatchActive) {
+                const stillIntact = (
+                    adapter.read === this._patchedRead &&
+                    adapter.readBinary === this._patchedReadBinary &&
+                    adapter.write === this._patchedWrite
+                );
+                if (!stillIntact) {
+                    console.warn('(⊙ˍ⊙) UWU-Crypt: Monkey-patch integrity compromised! Another plugin may have overwritten our hooks.');
+                    this.monkeyPatchActive = false;
+                }
+            }
+        }, 30000);
+        this.register(() => clearInterval(integrityInterval));
     }
 
     private isEncrypted(buffer: ArrayBufferLike): boolean {
@@ -727,7 +746,7 @@ export default class UwuCryptPlugin extends Plugin {
         return 0;
     }
 
-    private async getCachedDecryption(path: string, encryptedData: ArrayBuffer): Promise<{ data: Uint8Array, mask: Uint8Array }> {
+    private async getCachedDecryption(path: string, encryptedData: ArrayBuffer): Promise<{ data: Uint8Array, nonce: Uint8Array }> {
         const key = path + ":" + encryptedData.byteLength;
         if (this.decryptionCache.has(key)) {
             return this.decryptionCache.get(key)!;
@@ -738,18 +757,19 @@ export default class UwuCryptPlugin extends Plugin {
 
         const promise = (async () => {
             const plaintext = await this.vaultManager.decrypt(ciphertext);
-            const mask = new Uint8Array(32);
-            crypto.getRandomValues(mask);
 
-            // Mask the data before storing
-            this.maskData(plaintext, mask);
+            // ChaCha8 masking — 4-byte random nonce via WASM
+            const nonce = new Uint8Array(4);
+            crypto.getRandomValues(nonce);
 
-            return { data: plaintext, mask };
+            const masked = await this.maskData(plaintext, nonce);
+
+            return { data: masked, nonce };
         })();
 
         this.decryptionCache.set(key, promise);
 
-        // Уменьшенный TTL 1 секунда + очистка предыдущего таймера
+        // TTL 500ms — minimize plaintext residence in JS heap
         const prevTimer = this.decryptionTimers.get(key);
         if (prevTimer) clearTimeout(prevTimer);
 
@@ -758,12 +778,12 @@ export default class UwuCryptPlugin extends Plugin {
             if (cached) {
                 cached.then(c => {
                     c.data.fill(0);
-                    c.mask.fill(0);
+                    c.nonce.fill(0);
                 }).catch(() => {});
             }
             this.decryptionCache.delete(key);
             this.decryptionTimers.delete(key);
-        }, 1000);
+        }, 500);
 
         this.decryptionTimers.set(key, timerId);
 
@@ -784,17 +804,25 @@ export default class UwuCryptPlugin extends Plugin {
 
             const cached = this.decryptionCache.get(key);
             if (cached) {
-                cached.then(c => { c.data.fill(0); c.mask.fill(0); }).catch(() => {});
+                cached.then(c => { c.data.fill(0); c.nonce.fill(0); }).catch(() => {});
             }
             this.decryptionCache.delete(key);
         }
     }
 
-    private maskData(data: Uint8Array, mask: Uint8Array) {
-        if (mask.length === 0) return;
-        for (let i = 0; i < data.length; i++) {
-            data[i] ^= mask[i % mask.length];
-        }
+    // ChaCha8 masking via WASM — async, delegates to Rust core
+    private async maskData(data: Uint8Array, nonce: Uint8Array): Promise<Uint8Array> {
+        if (nonce.length !== 4) return data;
+        await (this.vaultManager as any).readyPromise;
+        const result = await (this.vaultManager as any).sendMessage('MASK', { data, nonce });
+        return result.data;
+    }
+
+    private async unmaskData(data: Uint8Array, nonce: Uint8Array): Promise<Uint8Array> {
+        if (nonce.length !== 4) return data;
+        await (this.vaultManager as any).readyPromise;
+        const result = await (this.vaultManager as any).sendMessage('UNMASK', { data, nonce });
+        return result.data;
     }
 
     private setupResourceObserver() {
@@ -843,35 +871,42 @@ export default class UwuCryptPlugin extends Plugin {
         try {
             const sigLen = (this.vaultManager.signature as any)?.length || 16;
             const adapter = this.app.vault.adapter;
-            
+
             // Optimization for Desktop: Use node:fs to read only the first few bytes
             if ((window as any).process && (window as any).process.versions.node) {
-                const fs = (window as any).require('fs');
-                const fullPath = (adapter as any).getFullPath(path);
-                
-                return new Promise((resolve) => {
-                    fs.open(fullPath, 'r', (err: any, fd: number) => {
-                        if (err) return resolve(null);
-                        const buffer = new Uint8Array(sigLen);
-                        fs.read(fd, buffer, 0, sigLen, 0, (err: any) => {
-                            fs.close(fd, () => {});
-                            if (err) resolve(null);
-                            else resolve(buffer);
+                try {
+                    const fs = (window as any).require('fs');
+                    const fullPath = (adapter as any).getFullPath(path);
+
+                    return new Promise((resolve) => {
+                        fs.open(fullPath, 'r', (err: any, fd: number) => {
+                            if (err) return resolve(null);
+                            const buffer = new Uint8Array(sigLen);
+                            fs.read(fd, buffer, 0, sigLen, 0, (err: any) => {
+                                fs.close(fd, () => {});
+                                if (err) resolve(null);
+                                else resolve(buffer);
+                            });
                         });
                     });
-                });
+                } catch {
+                    // require('fs') failed — CSP restricted, fall through to DataAdapter
+                }
             }
 
             // Fallback for Mobile: Read entire file (no range API in Obsidian DataAdapter unfortunately)
             // But we skip massive files to prevent OOM
-            const stat = await adapter.stat(path);
-            if (stat && stat.size > 10 * 1024 * 1024) { // > 10MB
-                 return null; // Prob not an encrypted file if it's a huge raw binary? 
-                 // Actually, huge encrypted files exist. We'll just have to hope it's rare to scan them all.
+            try {
+                const stat = await adapter.stat(path);
+                if (stat && stat.size > 10 * 1024 * 1024) { // > 10MB
+                     return null;
+                }
+
+                const buffer = await this.originalAdapterReadBinary.call(adapter, path);
+                return new Uint8Array(buffer.slice(0, sigLen));
+            } catch {
+                return null;
             }
-            
-            const buffer = await this.originalAdapterReadBinary.call(adapter, path);
-            return new Uint8Array(buffer.slice(0, sigLen));
         } catch (e) {
             return null;
         }
@@ -908,14 +943,9 @@ export default class UwuCryptPlugin extends Plugin {
                                 await this.resourceProcessor.getDecryptedBlobUrl(file);
                             }
 
-                            // Forceful refresh for PDFs and other complex views
+                            // Forceful refresh for PDFs and other complex views — direct onLoadFile
                             if (ext === 'pdf' || leaf.view.getViewType() !== 'markdown') {
-                                const state = leaf.getViewState();
-                                const active = leaf === this.app.workspace.getMostRecentLeaf();
-                                await leaf.setViewState({ type: 'empty' }, { history: false });
-                                setTimeout(() => {
-                                    leaf.setViewState({ ...state, active }, { history: false });
-                                }, 100);
+                                try { (leaf.view as any).onLoadFile?.(file); } catch (e) { leaf.view.load(); }
                             } else {
                                 try { (leaf.view as any).onLoadFile?.(file); } catch (e) { leaf.view.load(); }
                             }
@@ -933,20 +963,21 @@ export default class UwuCryptPlugin extends Plugin {
     private async scanVaultForEncryptedFiles() {
         await (this.vaultManager as any).readyPromise;
         const files = this.app.vault.getFiles();
-        
-        // Parallel scan with limited concurrency
-        const concurrency = 10; 
+
+        // Adaptive concurrency — max 5 for mobile safety
+        const hwConcurrency = typeof navigator !== 'undefined' && (navigator as any).hardwareConcurrency;
+        const concurrency = Math.min(5, hwConcurrency ? Math.max(1, hwConcurrency - 1) : 2);
         const queue = [...files];
         const processNext = async () => {
             while (queue.length > 0) {
                 const file = queue.shift();
                 if (!file) break;
-                
+
                 const sig = await this.getFileSignature(file.path);
                 if (sig && this.isEncrypted(sig.buffer)) {
                     this.encryptedPaths.add(file.path);
                 }
-                
+
                 // Yield occasionally
                 if (queue.length % 50 === 0) await new Promise(resolve => setTimeout(resolve, 0));
             }

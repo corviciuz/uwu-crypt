@@ -1,10 +1,12 @@
 use argon2::{Algorithm as ArgonAlgorithm, Argon2, Params as ArgonParams, Version as ArgonVersion};
-use blake3;
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
+use chacha20::ChaCha8;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
 use core::convert::TryInto;
+use js_sys::{self, Uint8Array};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -14,17 +16,9 @@ const STEALTH_SIG_KEY: &[u8] = b"UWU_V1";
 const ARGON_P: u32 = 1;
 const ARGON_OUT_LEN: usize = 32;
 
-use std::sync::Mutex;
-static SCRATCH_BUFFER: Mutex<Vec<u8>> = Mutex::new(Vec::new());
-
 #[wasm_bindgen]
 pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
-}
-
-#[wasm_bindgen]
-pub fn zeroize_scratch() {
-    SCRATCH_BUFFER.lock().expect("Failed to lock scratch buffer").zeroize();
 }
 
 #[derive(Serialize, Deserialize, Clone, Zeroize, ZeroizeOnDrop)]
@@ -267,11 +261,13 @@ impl UwuCore {
 
     #[wasm_bindgen]
     pub fn test_performance(m: u32, t: u32, progress_callback: Option<js_sys::Function>) -> Result<(), String> {
-        let pass = b"benchmark_password";
+        let mut pass = [0u8; 64];
+        getrandom::fill(&mut pass).map_err(|e| e.to_string())?;
         let s_mix = [0u8; 64];
         let s_argon1 = [0u8; 64];
         let s_argon2 = [0u8; 64];
-        derive_master_key(pass, &s_mix, &s_argon1, &s_argon2, m, t, progress_callback.as_ref())?;
+        derive_master_key(&pass, &s_mix, &s_argon1, &s_argon2, m, t, progress_callback.as_ref())?;
+        pass.zeroize();
         Ok(())
     }
 
@@ -279,13 +275,13 @@ impl UwuCore {
     pub fn encrypt_file(&self, data: &[u8], zstd_level: i32) -> Result<Vec<u8>, String> {
         let mut file_salt = [0u8; 32];
         let mut nonce = [0u8; 24];
-        let mut unmasked_key = [0u8; 32];
 
         getrandom::fill(&mut file_salt).map_err(|e| e.to_string())?;
         getrandom::fill(&mut nonce).map_err(|e| e.to_string())?;
 
-        for i in 0..32 {
-            unmasked_key[i] = self.masked_key[i] ^ self.ephemeral_mask[i];
+        let mut unmasked_key = [0u8; 32];
+        for (i, item) in unmasked_key.iter_mut().enumerate() {
+            *item = self.masked_key[i] ^ self.ephemeral_mask[i];
         }
         let file_key = blake3::keyed_hash(&unmasked_key, &file_salt);
         unmasked_key.zeroize();
@@ -309,6 +305,8 @@ impl UwuCore {
         };
         let res = rmp_serde::to_vec(&package).map_err(|e| e.to_string());
         compressed.zeroize();
+        file_salt.zeroize();
+        nonce.zeroize();
         res
     }
 
@@ -317,9 +315,8 @@ impl UwuCore {
         let package: FilePackage =
             rmp_serde::from_slice(package_bytes).map_err(|e| e.to_string())?;
         let mut unmasked_key = [0u8; 32];
-
-        for i in 0..32 {
-            unmasked_key[i] = self.masked_key[i] ^ self.ephemeral_mask[i];
+        for (i, item) in unmasked_key.iter_mut().enumerate() {
+            *item = self.masked_key[i] ^ self.ephemeral_mask[i];
         }
         let file_key = blake3::keyed_hash(&unmasked_key, &package.salt);
         unmasked_key.zeroize();
@@ -339,21 +336,47 @@ impl UwuCore {
         let decompressed = decode_all(compressed.as_slice()).map_err(|e| e.to_string())?;
         compressed.zeroize();
 
-        // Write result to scratch buffer to ensure physical erasure on demand
-        let mut buf = SCRATCH_BUFFER.lock().expect("Failed to lock scratch buffer");
-        buf.zeroize();
-        *buf = decompressed;
-        Ok(unsafe { js_sys::Uint8Array::view(buf.as_slice()) })
+        // Return owned Uint8Array — no shared buffer, no data race
+        Ok(js_sys::Uint8Array::from(decompressed.as_slice()))
     }
 
+    /// ChaCha8-based cache masking — cryptographically secure, counter-based
     #[wasm_bindgen]
-    pub fn mask_data(&self, data: &mut [u8], mask: &[u8]) {
-        if mask.is_empty() {
+    pub fn mask_data(&self, data: &mut [u8], nonce_4: &[u8]) {
+        if nonce_4.len() != 4 {
             return;
         }
-        for (i, byte) in data.iter_mut().enumerate() {
-            *byte ^= mask[i % mask.len()];
+        // Build 12-byte nonce: 4 bytes random + 8 bytes zero counter
+        let mut full_nonce = [0u8; 12];
+        full_nonce[..4].copy_from_slice(nonce_4);
+
+        let mut unmasked_key = [0u8; 32];
+        for (i, item) in unmasked_key.iter_mut().enumerate() {
+            *item = self.masked_key[i] ^ self.ephemeral_mask[i];
         }
+
+        let mut cipher = ChaCha8::new(&unmasked_key.into(), &full_nonce.into());
+        unmasked_key.zeroize();
+        cipher.apply_keystream(data);
+    }
+
+    /// Unmask data with the same nonce — ChaCha8 is symmetric
+    #[wasm_bindgen]
+    pub fn unmask_data(&self, data: &mut [u8], nonce_4: &[u8]) {
+        if nonce_4.len() != 4 {
+            return;
+        }
+        let mut full_nonce = [0u8; 12];
+        full_nonce[..4].copy_from_slice(nonce_4);
+
+        let mut unmasked_key = [0u8; 32];
+        for (i, item) in unmasked_key.iter_mut().enumerate() {
+            *item = self.masked_key[i] ^ self.ephemeral_mask[i];
+        }
+
+        let mut cipher = ChaCha8::new(&unmasked_key.into(), &full_nonce.into());
+        unmasked_key.zeroize();
+        cipher.apply_keystream(data);
     }
 }
 
@@ -363,7 +386,17 @@ pub fn get_signature() -> Vec<u8> {
     sig_hash.as_bytes()[..16].to_vec()
 }
 
-use js_sys::Uint8Array;
+/// Parse manifest bytes and return {m, t} as JsValue
+#[wasm_bindgen]
+pub fn get_manifest_params(manifest_bytes: &[u8]) -> Result<JsValue, String> {
+    let manifest: VaultManifest =
+        rmp_serde::from_slice(manifest_bytes).map_err(|e| e.to_string())?;
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(&obj, &JsValue::from("m"), &JsValue::from(manifest.argon_m)).map_err(|e| format!("Failed to set m: {:?}", e))?;
+    js_sys::Reflect::set(&obj, &JsValue::from("t"), &JsValue::from(manifest.argon_t)).map_err(|e| format!("Failed to set t: {:?}", e))?;
+    Ok(obj.into())
+}
+
 
 #[cfg(test)]
 mod tests {

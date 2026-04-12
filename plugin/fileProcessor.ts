@@ -5,9 +5,13 @@ export class FileProcessor {
     private activeOperations = new Map<string, Promise<void>>();
     private queue: (() => Promise<void>)[] = [];
     private activeCount = 0;
-    private maxConcurrency = 2;
+    private maxConcurrency: number;
 
-    constructor(private plugin: any, private vaultManager: VaultManager, private settings: any) {}
+    constructor(private plugin: any, private vaultManager: VaultManager, private settings: any) {
+        // Adaptive concurrency based on device capabilities
+        const hwConcurrency = typeof navigator !== 'undefined' && (navigator as any).hardwareConcurrency;
+        this.maxConcurrency = hwConcurrency ? Math.max(1, hwConcurrency - 1) : 2;
+    }
 
     private get app(): App {
         return this.plugin.app;

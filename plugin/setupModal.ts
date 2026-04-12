@@ -250,39 +250,25 @@ export class SetupModal extends Modal {
                                     this.recoveryManifestBytes = bytes;
                                     recoverySetting.setDesc("Manifest OK (⌐■_■)");
                                     recoverySetting.descEl.style.color = "var(--text-success)";
-                                    
-                                    // Parse Argon2 params from MessagePack (they are the last two fields)
-                                    // agon_t is the last byte (usually 1-10, so it's a fixint)
-                                    const t = bytes[bytes.length - 1];
-                                    
-                                    // argon_m is usually before it, as a u32 (0xCE + 4 bytes BE)
-                                    let mKiB = 524288; // default
-                                    for (let i = bytes.length - 2; i > bytes.length - 10; i--) {
-                                        if (bytes[i] === 0xCE) { // u32 marker
-                                            const view = new DataView(bytes.buffer, bytes.byteOffset + i + 1, 4);
-                                            mKiB = view.getUint32(0, false); // Big Endian
-                                            break;
-                                        } else if (bytes[i] === 0xCD) { // u16 marker
-                                            const view = new DataView(bytes.buffer, bytes.byteOffset + i + 1, 2);
-                                            mKiB = view.getUint16(0, false);
-                                            break;
-                                        }
-                                    }
-                                    
-                                    const mMiB = Math.round(mKiB / 1024);
-                                    this.argonM = mMiB;
-                                    this.argonT = t;
 
-                                    // Update Sliders UI
-                                    if (this.mSlider) {
-                                        this.mSlider.setValue(mMiB);
-                                        this.mSetting?.setDesc(`${mMiB} MB`);
+                                    // Parse Argon2 params via WASM — no manual byte parsing
+                                    const { get_manifest_params } = await import('../pkg/uwu_crypt.js');
+                                    const params = get_manifest_params(bytes) as { m: number, t: number };
+                                    if (params && typeof params.m === 'number' && typeof params.t === 'number') {
+                                        this.argonM = params.m;
+                                        this.argonT = params.t;
+
+                                        // Update Sliders UI
+                                        if (this.mSlider) {
+                                            this.mSlider.setValue(params.m);
+                                            this.mSetting?.setDesc(`${params.m} MB`);
+                                        }
+                                        if (this.tSlider) {
+                                            this.tSlider.setValue(params.t);
+                                            this.tSetting?.setDesc(`${params.t}`);
+                                        }
+                                        this.updateEstimation(this.passInputEl?.value || "");
                                     }
-                                    if (this.tSlider) {
-                                        this.tSlider.setValue(t);
-                                        this.tSetting?.setDesc(`${t}`);
-                                    }
-                                    this.updateEstimation(this.passInputEl?.value || "");
                                 } else {
                                     throw new Error("Invalid structure");
                                 }

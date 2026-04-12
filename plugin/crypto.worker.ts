@@ -1,4 +1,4 @@
-import init, { UwuCore, get_signature, init_panic_hook, zeroize_scratch } from '../pkg/uwu_crypt.js';
+import init, { UwuCore, get_signature, init_panic_hook } from '../pkg/uwu_crypt.js';
 
 let core: UwuCore | null = null;
 
@@ -43,7 +43,7 @@ self.onmessage = async (e) => {
                 const perf_progress_cb = (p: number) => {
                     (self as any).postMessage({ id, type: 'PROGRESS', payload: { progress: p } });
                 };
-                await (UwuCore as any).test_performance(payload.m, payload.t, perf_progress_cb); 
+                await (UwuCore as any).test_performance(payload.m, payload.t, perf_progress_cb);
                 (self as any).postMessage({ id, type: 'TEST_DONE' });
                 break;
 
@@ -53,9 +53,8 @@ self.onmessage = async (e) => {
                 break;
 
             case 'DECRYPT':
-                const view = core!.decrypt_file(payload.data);
-                const plaintext = view.slice(); // Copy to separate buffer for transfer
-                zeroize_scratch(); // IMMEDIATELY wipe WASM memory
+                const plaintext = core!.decrypt_file(payload.data);
+                // decrypt_file now returns owned Uint8Array — no shared buffer
                 (self as any).postMessage({ id, type: 'DECRYPTED', payload: { data: plaintext } }, [plaintext.buffer]);
                 break;
 
@@ -64,8 +63,17 @@ self.onmessage = async (e) => {
                     core.free();
                     core = null;
                 }
-                zeroize_scratch();
                 (self as any).postMessage({ id, type: 'LOCKED' });
+                break;
+
+            case 'MASK':
+                core!.mask_data(payload.data, payload.nonce);
+                (self as any).postMessage({ id, type: 'MASKED', payload: { data: payload.data } }, [payload.data.buffer]);
+                break;
+
+            case 'UNMASK':
+                core!.unmask_data(payload.data, payload.nonce);
+                (self as any).postMessage({ id, type: 'UNMASKED', payload: { data: payload.data } }, [payload.data.buffer]);
                 break;
 
             default:
@@ -75,15 +83,20 @@ self.onmessage = async (e) => {
         const message = err instanceof Error ? err.message : String(err);
         (self as any).postMessage({ id, type: 'ERROR', payload: { message: message || 'An unknown error occurred in the worker' } });
     } finally {
+        // Zeroize sensitive payloads with proper error isolation
         if (payload) {
             try {
-                if (payload.password instanceof Uint8Array && payload.password.buffer.byteLength > 0) {
+                if (payload.password instanceof Uint8Array && payload.password.byteLength > 0) {
                     payload.password.fill(0);
                 }
-                if (payload.data instanceof Uint8Array && payload.data.buffer.byteLength > 0) {
+            } catch {}
+            try {
+                if (payload.data instanceof Uint8Array && payload.data.byteLength > 0) {
                     payload.data.fill(0);
                 }
-                if (payload.payload instanceof Uint8Array && payload.payload.buffer.byteLength > 0) {
+            } catch {}
+            try {
+                if (payload.payload instanceof Uint8Array && payload.payload.byteLength > 0) {
                     payload.payload.fill(0);
                 }
             } catch {}
