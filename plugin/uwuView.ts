@@ -154,4 +154,40 @@ export class UwuView extends FileView {
             this.renderLocked();
         }
     }
+
+    static renderMediaPlaceholder(el: HTMLElement) {
+        const target = (el.tagName === 'IMG' || el.tagName === 'VIDEO' || el.tagName === 'AUDIO') ? 
+             (el.parentElement?.hasClass('internal-embed') ? el.parentElement : el) : el;
+             
+        if (target.tagName === 'IMG' || target.tagName === 'VIDEO' || target.tagName === 'AUDIO') {
+            const wrapper = target.ownerDocument.createElement('div');
+            target.insertAdjacentElement('afterend', wrapper);
+            target.style.display = 'none';
+            this.buildMediaLockUI(wrapper);
+        } else {
+            target.empty();
+            if (target.style.backgroundImage) target.style.backgroundImage = 'none';
+            this.buildMediaLockUI(target as HTMLElement);
+        }
+    }
+
+    private static buildMediaLockUI(container: HTMLElement) {
+        container.addClass("uwu-media-locked-placeholder");
+        container.style.display = "flex";
+        container.style.alignItems = "center";
+        container.style.justifyContent = "center";
+        container.style.height = "50px";
+        container.style.width = "100%";
+        container.style.maxWidth = "400px";
+        container.style.background = "transparent";
+        container.style.border = "1px dashed var(--text-faint)";
+        container.style.borderRadius = "8px";
+        container.style.color = "var(--text-muted)";
+        container.style.fontFamily = "var(--font-text)";
+        container.style.fontSize = "1em";
+        container.style.opacity = "0.8";
+        container.style.margin = "10px 0";
+        
+        container.setText("(⌐■_■) Media is Encrypted");
+    }
 }

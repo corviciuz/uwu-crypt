@@ -1089,6 +1089,8 @@ export default class UwuCryptPlugin extends Plugin {
                     if (blobUrl) {
                         (el as any).src = blobUrl;
                         if ((el as any).load) (el as any).load();
+                    } else {
+                        UwuView.renderMediaPlaceholder(el);
                     }
                     return;
                 }
@@ -1113,7 +1115,11 @@ export default class UwuCryptPlugin extends Plugin {
         if (file instanceof TFile && this.isImage(file)) {
              if (this.resourceProcessor.hasCached(file.path)) {
                 const blobUrl = await this.resourceProcessor.getDecryptedBlobUrl(file);
-                if (blobUrl) el.style.backgroundImage = `url("${blobUrl}")`;
+                if (blobUrl) {
+                    el.style.backgroundImage = `url("${blobUrl}")`;
+                } else {
+                    UwuView.renderMediaPlaceholder(el);
+                }
                 return;
             }
             
@@ -1141,6 +1147,8 @@ export default class UwuCryptPlugin extends Plugin {
                                 (el as any).src = blobUrl;
                             }
                             el.setAttribute('data-uwu-decrypted', 'true');
+                        } else {
+                            UwuView.renderMediaPlaceholder(el);
                         }
                     }
                 }
