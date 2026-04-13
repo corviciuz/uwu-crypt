@@ -4,6 +4,9 @@ import { VaultManager } from "./vaultManager.ts";
 export const UWU_VIEW_TYPE = "uwu-view";
 
 export class UwuView extends FileView {
+    // Must be the ORIGINAL (unpatched) readBinary to always get raw encrypted bytes
+    public originalReadBinary?: (path: string) => Promise<ArrayBuffer>;
+
     constructor(leaf: WorkspaceLeaf, private vaultManager: VaultManager) {
         super(leaf);
     }
@@ -14,6 +17,10 @@ export class UwuView extends FileView {
 
     getDisplayText(): string {
         return this.file?.name || "Encrypted File";
+    }
+
+    getState(): Record<string, unknown> {
+        return { file: this.file?.path ?? "" };
     }
 
     private lockedEl: HTMLElement | null = null;
@@ -36,7 +43,7 @@ export class UwuView extends FileView {
         this.render();
     }
 
-    private async render() {
+    async render() {
         if (!this.file) return;
 
         // Check if file is encrypted (signature check)
@@ -82,8 +89,9 @@ export class UwuView extends FileView {
     private async isEncryptedFile(file: TFile): Promise<boolean> {
         try {
             await (this.vaultManager as any).readyPromise;
-            // Use original adapter to be sure we read raw data
-            const buffer = await this.app.vault.adapter.readBinary(file.path);
+            // Use original (unpatched) adapter to always get raw encrypted bytes
+            const readRaw = this.originalReadBinary ?? this.app.vault.adapter.readBinary.bind(this.app.vault.adapter);
+            const buffer = await readRaw(file.path);
             return this.vaultManager.isEncrypted(buffer);
         } catch {
             return false;
@@ -133,7 +141,10 @@ export class UwuView extends FileView {
         }
 
         try {
-            const encryptedData = await this.app.vault.readBinary(this.file!);
+            // Always read raw encrypted bytes via original adapter — patched readBinary decrypts transparently
+            // which would cause double-decryption corruption
+            const readRaw = this.originalReadBinary ?? this.app.vault.adapter.readBinary.bind(this.app.vault.adapter);
+            const encryptedData = await readRaw(this.file!.path);
             const sig = this.vaultManager.signature;
             const ciphertext = new Uint8Array(encryptedData).slice(sig.length);
             const plaintext = await this.vaultManager.decrypt(ciphertext);
@@ -156,18 +167,34 @@ export class UwuView extends FileView {
     }
 
     static renderMediaPlaceholder(el: HTMLElement) {
-        const target = (el.tagName === 'IMG' || el.tagName === 'VIDEO' || el.tagName === 'AUDIO') ? 
-             (el.parentElement?.hasClass('internal-embed') ? el.parentElement : el) : el;
-             
-        if (target.tagName === 'IMG' || target.tagName === 'VIDEO' || target.tagName === 'AUDIO') {
-            const wrapper = target.ownerDocument.createElement('div');
-            target.insertAdjacentElement('afterend', wrapper);
-            target.style.display = 'none';
+        if (el.getAttribute('data-uwu-hidden') === 'true' || el.hasClass('uwu-media-locked-placeholder')) return;
+        
+        el.setAttribute('data-uwu-hidden', 'true');
+        el.setAttribute('data-uwu-original-display', el.style.display);
+        
+        if (el.tagName === 'IMG' || el.tagName === 'VIDEO' || el.tagName === 'AUDIO' || el.tagName === 'IFRAME' || el.tagName === 'EMBED') {
+            el.style.display = 'none';
+            const wrapper = el.ownerDocument.createElement('div');
+            el.insertAdjacentElement('afterend', wrapper);
             this.buildMediaLockUI(wrapper);
+            wrapper.setAttribute('data-uwu-placeholder-child', 'false');
         } else {
-            target.empty();
-            if (target.style.backgroundImage) target.style.backgroundImage = 'none';
-            this.buildMediaLockUI(target as HTMLElement);
+            if (el.style.backgroundImage) {
+                el.setAttribute('data-uwu-original-bg', el.style.backgroundImage);
+                el.style.backgroundImage = 'none';
+            }
+            
+            Array.from(el.children).forEach((child: Element) => {
+                if (child instanceof HTMLElement) {
+                    child.setAttribute('data-uwu-child-display', child.style.display);
+                    child.style.display = 'none';
+                }
+            });
+            
+            const wrapper = el.ownerDocument.createElement('div');
+            el.appendChild(wrapper);
+            this.buildMediaLockUI(wrapper);
+            wrapper.setAttribute('data-uwu-placeholder-child', 'true');
         }
     }
 
