@@ -13,7 +13,7 @@ interface UwuCryptSettings {
     encryptedFolders: string[];
     showIndicators: boolean;
     manifestBackup: string | null;
-    panicLock: boolean;
+    webEngineReload: boolean;
 }
 
 const DEFAULT_SETTINGS: UwuCryptSettings = {
@@ -24,7 +24,7 @@ const DEFAULT_SETTINGS: UwuCryptSettings = {
     encryptedFolders: [],
     showIndicators: true,
     manifestBackup: null,
-    panicLock: true
+    webEngineReload: true
 };
 
 export default class UwuCryptPlugin extends Plugin {
@@ -1333,12 +1333,12 @@ class UwuCryptSettingTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Panic Lock')
-            .setDesc('Reload workspace upon vault lock to securely wipe JavaScript engine memory leaks.')
+            .setName('WebEngine Reload on Lock')
+            .setDesc('Reloads the application context upon vault lock, forcing the JavaScript engine to destroy the heap and clear all decrypted data from memory.')
             .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.panicLock)
+                .setValue(this.plugin.settings.webEngineReload)
                 .onChange(async (value) => {
-                    this.plugin.settings.panicLock = value;
+                    this.plugin.settings.webEngineReload = value;
                     await this.plugin.saveSettings();
                 }));
     }

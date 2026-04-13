@@ -21,7 +21,7 @@ Keys and salts are zeroized after every cryptographic operation.
 - **On-the-fly interception** — DataAdapter monkey-patching (read/write/rename/remove)
 - **Lazy media decryption** — IntersectionObserver decrypts resources on viewport entry
 - **Session timeout** — auto-lock after configurable inactivity
-- **Panic Lock** — aggressively destroys JavaScript memory leaks by reloading the application context upon locking
+- **WebEngine Reload on Lock** — reloads the application context upon locking, forcing the JavaScript engine to destroy the heap and clear all decrypted data from memory
 - **Bring Your Own Manifest (BYOM)** — initialize vault using existing manifest backup from settings
 
 ## Storage Format
@@ -31,7 +31,7 @@ Keys and salts are zeroized after every cryptographic operation.
 
 ## Security Limitations
 
-- **JS string immutability** — decrypted plaintext strings cannot be directly wiped from the V8 (JavaScript) heap via code. We mitigate this using a strict 500ms cache TTL and the **Panic Lock** feature, which wipes the entire engine state upon vault lock.
+- **JS string immutability** — decrypted plaintext strings cannot be directly wiped from the JavaScript heap via code. We mitigate this using a strict 500ms cache TTL and the **WebEngine Reload on Lock** feature, which forces the engine to destroy the entire heap state upon vault lock.
 - **Monkey-patch dependency** — conflicting plugins that overwrite DataAdapter methods will bypass encryption hooks. Integrity is verified on every I/O operation.
 
 ## Build Instructions

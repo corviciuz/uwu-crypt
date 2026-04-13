@@ -217,25 +217,31 @@ export class VaultManager {
     }
 
     async lockVault(): Promise<void> {
-        await this.sendMessage('LOCK');
-        // Reject all pending — worker will not respond after LOCK
-        for (const [, pending] of this.pendingMessages) {
-            pending.reject(new Error('Vault locked'));
-        }
-        this.pendingMessages.clear();
-        this.isLocked = true;
-        this.unlockPromise = null;
-        this.plugin.app.workspace.trigger('uwu-crypt:lock');
-        if (this.sessionTimeoutTimer) {
-            window.clearTimeout(this.sessionTimeoutTimer);
-            this.sessionTimeoutTimer = null;
+        try {
+            await this.sendMessage('LOCK');
+        } catch {
+            // Worker may already be dead or unresponsive — proceed to cleanup regardless
+        } finally {
+            // Reject all pending — worker will not respond after LOCK
+            for (const [, pending] of this.pendingMessages) {
+                pending.reject(new Error('Vault locked'));
+            }
+            this.pendingMessages.clear();
+            this.isLocked = true;
+            this.unlockPromise = null;
+            this.plugin.app.workspace.trigger('uwu-crypt:lock');
+            if (this.sessionTimeoutTimer) {
+                window.clearTimeout(this.sessionTimeoutTimer);
+                this.sessionTimeoutTimer = null;
+            }
         }
 
-        if ((this.plugin as any).settings.panicLock) {
-            new Notice('(⊙_⊙) Panic Lock! Wiping memory and reloading...', 2000);
+        if ((this.plugin as any).settings.webEngineReload) {
+            new Notice('(⌐■_■) WebEngine Reload! Wiping memory and reloading...', 2000);
+            // Delay long enough for the cleanup above to fully settle before reload destroys the context
             setTimeout(() => {
                 (this.plugin.app as any).commands.executeCommandById('app:reload');
-            }, 100);
+            }, 300);
         }
     }
 
