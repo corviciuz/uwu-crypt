@@ -3,6 +3,13 @@ import { VaultManager } from './vaultManager.ts';
 
 const BLOB_TTL = 30000; // 30s — blob URLs need time for streaming, seek, preload
 
+export const MEDIA_EXTENSIONS = [
+    'png', 'jpg', 'jpeg', 'jfif', 'gif', 'webp', 'svg', 'bmp', 'avif', 'heic', 'heif', 'jxl', 'tif', 'tiff', 'ico', // Images
+    'mp3', 'wav', 'm4a', 'ogg', '3gp', 'flac', 'aac', 'opus', // Audio
+    'mp4', 'webm', 'ogv', 'mov', 'mkv', // Video
+    'pdf' // Documents
+];
+
 export class ResourceProcessor {
     private blobCache = new Map<string, { url: string; timer: number | null }>(); // path -> { url, timer }
 
