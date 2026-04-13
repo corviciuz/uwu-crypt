@@ -761,8 +761,8 @@ export default class UwuCryptPlugin extends Plugin {
         const promise = (async () => {
             const plaintext = await this.vaultManager.decrypt(ciphertext);
 
-            // ChaCha8 masking — 4-byte random nonce via WASM
-            const nonce = new Uint8Array(4);
+            // ChaCha8 masking — 12-byte random nonce via WASM
+            const nonce = new Uint8Array(12);
             crypto.getRandomValues(nonce);
 
             const masked = await this.maskData(plaintext, nonce);

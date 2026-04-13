@@ -43,7 +43,6 @@ pub struct VaultManifest {
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct UwuCore {
     masked_key: [u8; 32],
-    ephemeral_mask: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -181,12 +180,12 @@ impl UwuCore {
 
         let session = UwuCore {
             masked_key,
-            ephemeral_mask,
         };
 
         let array = js_sys::Array::new();
         array.push(&JsValue::from(session));
         array.push(&Uint8Array::from(manifest_bytes.as_slice()).into());
+        array.push(&Uint8Array::from(ephemeral_mask.as_slice()).into());
         Ok(array.into())
     }
 
@@ -195,7 +194,7 @@ impl UwuCore {
         password: &[u8],
         manifest_bytes: &[u8],
         progress_callback: Option<js_sys::Function>,
-    ) -> Result<UwuCore, String> {
+    ) -> Result<JsValue, String> {
         let manifest: VaultManifest =
             rmp_serde::from_slice(manifest_bytes).map_err(|e| e.to_string())?;
         let sig_hash = blake3::hash(STEALTH_SIG_KEY);
@@ -253,10 +252,14 @@ impl UwuCore {
         }
         raw_master_key.zeroize();
 
-        Ok(UwuCore {
+        let session = UwuCore {
             masked_key,
-            ephemeral_mask,
-        })
+        };
+
+        let array = js_sys::Array::new();
+        array.push(&JsValue::from(session));
+        array.push(&Uint8Array::from(ephemeral_mask.as_slice()).into());
+        Ok(array.into())
     }
 
     #[wasm_bindgen]
@@ -272,7 +275,7 @@ impl UwuCore {
     }
 
     #[wasm_bindgen]
-    pub fn encrypt_file(&self, data: &[u8], zstd_level: i32) -> Result<Vec<u8>, String> {
+    pub fn encrypt_file(&self, data: &[u8], zstd_level: i32, ephemeral_mask: &[u8]) -> Result<Vec<u8>, String> {
         let mut file_salt = [0u8; 32];
         let mut nonce = [0u8; 24];
 
@@ -281,7 +284,7 @@ impl UwuCore {
 
         let mut unmasked_key = [0u8; 32];
         for (i, item) in unmasked_key.iter_mut().enumerate() {
-            *item = self.masked_key[i] ^ self.ephemeral_mask[i];
+            *item = self.masked_key[i] ^ ephemeral_mask[i];
         }
         let file_key = blake3::keyed_hash(&unmasked_key, &file_salt);
         unmasked_key.zeroize();
@@ -311,12 +314,12 @@ impl UwuCore {
     }
 
     #[wasm_bindgen]
-    pub fn decrypt_file(&self, package_bytes: &[u8]) -> Result<js_sys::Uint8Array, String> {
+    pub fn decrypt_file(&self, package_bytes: &[u8], ephemeral_mask: &[u8]) -> Result<js_sys::Uint8Array, String> {
         let package: FilePackage =
             rmp_serde::from_slice(package_bytes).map_err(|e| e.to_string())?;
         let mut unmasked_key = [0u8; 32];
         for (i, item) in unmasked_key.iter_mut().enumerate() {
-            *item = self.masked_key[i] ^ self.ephemeral_mask[i];
+            *item = self.masked_key[i] ^ ephemeral_mask[i];
         }
         let file_key = blake3::keyed_hash(&unmasked_key, &package.salt);
         unmasked_key.zeroize();
@@ -342,39 +345,38 @@ impl UwuCore {
 
     /// ChaCha8-based cache masking — cryptographically secure, counter-based
     #[wasm_bindgen]
-    pub fn mask_data(&self, data: &mut [u8], nonce_4: &[u8]) {
-        if nonce_4.len() != 4 {
+    pub fn mask_data(&self, data: &mut [u8], nonce_12: &[u8], ephemeral_mask: &[u8]) {
+        if nonce_12.len() != 12 {
             return;
         }
-        // Build 12-byte nonce: 4 bytes random + 8 bytes zero counter
-        let mut full_nonce = [0u8; 12];
-        full_nonce[..4].copy_from_slice(nonce_4);
 
         let mut unmasked_key = [0u8; 32];
         for (i, item) in unmasked_key.iter_mut().enumerate() {
-            *item = self.masked_key[i] ^ self.ephemeral_mask[i];
+            *item = self.masked_key[i] ^ ephemeral_mask[i];
         }
 
-        let mut cipher = ChaCha8::new(&unmasked_key.into(), &full_nonce.into());
+        let mut n_array = [0u8; 12];
+        n_array.copy_from_slice(nonce_12);
+        let mut cipher = ChaCha8::new(&unmasked_key.into(), &n_array.into());
         unmasked_key.zeroize();
         cipher.apply_keystream(data);
     }
 
     /// Unmask data with the same nonce — ChaCha8 is symmetric
     #[wasm_bindgen]
-    pub fn unmask_data(&self, data: &mut [u8], nonce_4: &[u8]) {
-        if nonce_4.len() != 4 {
+    pub fn unmask_data(&self, data: &mut [u8], nonce_12: &[u8], ephemeral_mask: &[u8]) {
+        if nonce_12.len() != 12 {
             return;
         }
-        let mut full_nonce = [0u8; 12];
-        full_nonce[..4].copy_from_slice(nonce_4);
 
         let mut unmasked_key = [0u8; 32];
         for (i, item) in unmasked_key.iter_mut().enumerate() {
-            *item = self.masked_key[i] ^ self.ephemeral_mask[i];
+            *item = self.masked_key[i] ^ ephemeral_mask[i];
         }
 
-        let mut cipher = ChaCha8::new(&unmasked_key.into(), &full_nonce.into());
+        let mut n_array = [0u8; 12];
+        n_array.copy_from_slice(nonce_12);
+        let mut cipher = ChaCha8::new(&unmasked_key.into(), &n_array.into());
         unmasked_key.zeroize();
         cipher.apply_keystream(data);
     }

@@ -1,7 +1,7 @@
 import init, { UwuCore, get_signature, init_panic_hook } from '../pkg/uwu_crypt.js';
 
 let core: UwuCore | null = null;
-
+let workerEphemeralMask: Uint8Array | null = null;
 async function setup(wasmBuffer: ArrayBuffer) {
     await init({ module_or_path: wasmBuffer });
     init_panic_hook();
@@ -26,8 +26,9 @@ self.onmessage = async (e) => {
                 const create_progress_cb = (p: number) => {
                     (self as any).postMessage({ id, type: 'PROGRESS', payload: { progress: p } });
                 };
-                const [newSession, manifest] = (UwuCore as any).create_vault(payload.password, payload.m, payload.t, create_progress_cb);
+                const [newSession, manifest, ephemeral_mask] = (UwuCore as any).create_vault(payload.password, payload.m, payload.t, create_progress_cb);
                 core = newSession;
+                workerEphemeralMask = ephemeral_mask;
                 (self as any).postMessage({ id, type: 'CREATED', payload: { manifest } }, [manifest.buffer]);
                 break;
 
@@ -35,7 +36,9 @@ self.onmessage = async (e) => {
                 const unlock_progress_cb = (p: number) => {
                     (self as any).postMessage({ id, type: 'PROGRESS', payload: { progress: p } });
                 };
-                core = (UwuCore as any).unlock_vault(payload.password, payload.payload, unlock_progress_cb);
+                const [unlockedSession, unlock_ephemeral_mask] = (UwuCore as any).unlock_vault(payload.password, payload.payload, unlock_progress_cb);
+                core = unlockedSession;
+                workerEphemeralMask = unlock_ephemeral_mask;
                 (self as any).postMessage({ id, type: 'UNLOCKED' });
                 break;
 
@@ -48,12 +51,12 @@ self.onmessage = async (e) => {
                 break;
 
             case 'ENCRYPT':
-                const ciphertext = core!.encrypt_file(payload.data, payload.zstdLevel);
+                const ciphertext = core!.encrypt_file(payload.data, payload.zstdLevel, workerEphemeralMask!);
                 (self as any).postMessage({ id, type: 'ENCRYPTED', payload: { data: ciphertext } }, [ciphertext.buffer]);
                 break;
 
             case 'DECRYPT':
-                const plaintext = core!.decrypt_file(payload.data);
+                const plaintext = core!.decrypt_file(payload.data, workerEphemeralMask!);
                 // decrypt_file now returns owned Uint8Array — no shared buffer
                 (self as any).postMessage({ id, type: 'DECRYPTED', payload: { data: plaintext } }, [plaintext.buffer]);
                 break;
@@ -63,16 +66,20 @@ self.onmessage = async (e) => {
                     core.free();
                     core = null;
                 }
+                if (workerEphemeralMask) {
+                    try { workerEphemeralMask.fill(0); } catch {}
+                    workerEphemeralMask = null;
+                }
                 (self as any).postMessage({ id, type: 'LOCKED' });
                 break;
 
             case 'MASK':
-                core!.mask_data(payload.data, payload.nonce);
+                core!.mask_data(payload.data, payload.nonce, workerEphemeralMask!);
                 (self as any).postMessage({ id, type: 'MASKED', payload: { data: payload.data } }, [payload.data.buffer]);
                 break;
 
             case 'UNMASK':
-                core!.unmask_data(payload.data, payload.nonce);
+                core!.unmask_data(payload.data, payload.nonce, workerEphemeralMask!);
                 (self as any).postMessage({ id, type: 'UNMASKED', payload: { data: payload.data } }, [payload.data.buffer]);
                 break;
 
