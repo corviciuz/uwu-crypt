@@ -228,6 +228,14 @@ export class VaultManager {
         this.plugin.app.workspace.trigger('uwu-crypt:lock');
         if (this.sessionTimeoutTimer) {
             window.clearTimeout(this.sessionTimeoutTimer);
+            this.sessionTimeoutTimer = null;
+        }
+
+        if ((this.plugin as any).settings.panicLock) {
+            new Notice('(⊙_⊙) Panic Lock! Wiping memory and reloading...', 2000);
+            setTimeout(() => {
+                (this.plugin.app as any).commands.executeCommandById('app:reload');
+            }, 100);
         }
     }
 

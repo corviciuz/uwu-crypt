@@ -13,6 +13,7 @@ interface UwuCryptSettings {
     encryptedFolders: string[];
     showIndicators: boolean;
     manifestBackup: string | null;
+    panicLock: boolean;
 }
 
 const DEFAULT_SETTINGS: UwuCryptSettings = {
@@ -22,7 +23,8 @@ const DEFAULT_SETTINGS: UwuCryptSettings = {
     encryptAll: false,
     encryptedFolders: [],
     showIndicators: true,
-    manifestBackup: null
+    manifestBackup: null,
+    panicLock: true
 };
 
 export default class UwuCryptPlugin extends Plugin {
@@ -1327,6 +1329,16 @@ class UwuCryptSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.encryptedFolders.join('\n'))
                 .onChange(async (value) => {
                     this.plugin.settings.encryptedFolders = value.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Panic Lock')
+            .setDesc('Reload workspace upon vault lock to securely wipe JavaScript engine memory leaks.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.panicLock)
+                .onChange(async (value) => {
+                    this.plugin.settings.panicLock = value;
                     await this.plugin.saveSettings();
                 }));
     }
